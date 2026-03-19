@@ -114,7 +114,7 @@ class RoleMixin(object):
                 return data.get('argument_specs', {})
         except (IOError, OSError) as e:
             raise AnsibleParserError("An error occurred while trying to read the file '%s': %s" % (path, to_native(e)), orig_exc=e)
-        except AnsibleParserError as e:
+        except Exception as e:
             # Gracefully handle malformed YAML or other parsing errors
             display.warning("Unable to parse role metadata file '%s': %s. Skipping." % (path, to_native(e)))
             return {}
@@ -219,15 +219,14 @@ class RoleMixin(object):
             for ep in argspec.keys():
                 entry_spec = argspec[ep] or {}
                 if isinstance(entry_spec, dict):
-                    # Keep empty string for machine-readable output compatibility
                     summary['entry_points'][ep] = entry_spec.get('short_description', '')
                 else:
                     # Handle malformed entry spec gracefully
-                    summary['entry_points'][ep] = ''
+                    summary['entry_points'][ep] = 'Invalid entry point specification'
         except Exception as e:
             # Fallback for severely malformed argspec
             display.warning("Error processing role '%s' argspec: %s. Using placeholder description." % (fqcn, to_native(e)))
-            summary['entry_points']['main'] = ''
+            summary['entry_points']['main'] = 'Role documentation unavailable due to metadata errors'
 
         return (fqcn, summary)
 
@@ -476,8 +475,8 @@ class DocCLI(CLI, RoleMixin):
         """Apply ANSI styling with no-color fallbacks.
 
         :param text: Text to style
-        :param style_type: Style to apply ('bold', 'underline', 'green', 'yellow', 'red', 'cyan', 'bright blue')
-        :param fallback_marker: Text marker to use when colors are disabled (used as prefix only)
+        :param style_type: Style to apply ('green', 'yellow', 'red', 'cyan', 'bright blue', 'bright green', etc.)
+        :param fallback_marker: Text marker to use when colors are disabled
         :param no_color: Override color detection (for testing)
         :returns: Styled text string
         """
@@ -495,12 +494,7 @@ class DocCLI(CLI, RoleMixin):
             return text
 
         if has_color and style_type:
-            # Handle bold color which doesn't exist in COLOR_CODES
-            if style_type == 'bold':
-                # Use ANSI bold escape sequence directly
-                return '\033[1m' + text + '\033[0m'
-            else:
-                return stringc(text, style_type)
+            return stringc(text, style_type)
         elif fallback_marker:
             return fallback_marker + text
         else:
@@ -517,7 +511,9 @@ class DocCLI(CLI, RoleMixin):
         if level == 1:
             # Major sections like OPTIONS, NOTES, SEE ALSO
             styled = cls._style_text(text, 'bright blue', '=== ', no_color=None)
-            return styled + "\n" + cls._style_text("-" * len(text), 'bright blue', '', no_color=None)
+            # Calculate underline length based on the actual styled text width (without ANSI codes)
+            styled_width = len(cls._strip_ansi(styled))
+            return styled + "\n" + cls._style_text("-" * styled_width, 'bright blue', '', no_color=None)
         else:
             # Subsections like suboptions
             return cls._style_text(text, 'cyan', '--- ')
@@ -525,7 +521,7 @@ class DocCLI(CLI, RoleMixin):
     @classmethod
     def _style_required(cls, text):
         """Style required field indicators."""
-        return cls._style_text(text, 'bright yellow', '(!) ')
+        return cls._style_text(text, 'yellow', '(!) ')
 
     @classmethod
     def _style_plugin_name(cls, text):
@@ -535,38 +531,19 @@ class DocCLI(CLI, RoleMixin):
     @classmethod
     def _style_url(cls, url):
         """Style URLs and links."""
-        if not url:
-            return ''
-        styled_url = cls._style_text(url, 'bright cyan', '<')
-        # Handle the closing > properly for no-color mode
-        try:
-            from ansible.utils.color import ANSIBLE_COLOR
-            has_color = ANSIBLE_COLOR
-        except ImportError:
-            has_color = False
-
-        if has_color:
-            return styled_url + '\033[0m>'
-        else:
-            return styled_url + '>'
+        return cls._style_text(url, 'bright cyan', '<', no_color=None) + (cls._style_text('', '', '>', no_color=None) if url else '')
 
     @classmethod
     def _style_constant(cls, text):
         """Style constants, file paths, and code."""
-        if not text:
-            return ''
-        styled_text = cls._style_text(text, 'bright magenta', '`')
-        # Handle the closing ' properly for no-color mode
-        try:
-            from ansible.utils.color import ANSIBLE_COLOR
-            has_color = ANSIBLE_COLOR
-        except ImportError:
-            has_color = False
+        return cls._style_text(text, 'bright magenta', '`', no_color=None) + (cls._style_text('', '', "'", no_color=None) if text else '')
 
-        if has_color:
-            return styled_text + '\033[0m\''
-        else:
-            return styled_text + '\''
+    @classmethod
+    def _strip_ansi(cls, text):
+        """Remove ANSI escape sequences from text for length calculations."""
+        import re
+        ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
+        return ansi_escape.sub('', text)
 
     @classmethod
     def _enhanced_tty_ify(cls, text):
@@ -577,14 +554,15 @@ class DocCLI(CLI, RoleMixin):
         # Then enhance specific patterns with colors (if available)
         # This preserves the ASCII fallbacks from tty_ify but adds colors when possible
 
-        # Replace asterisk-surrounded text (from B() markup) with bold
-        t = re.sub(r'\*([^*]+)\*', lambda m: cls._style_text(m.group(1), 'bold', '*', no_color=None) + (cls._style_text('', '', '*', no_color=None) if m.group(1) else ''), t)
+        # Replace bracketed text (from M() and P() markup) with plugin styling FIRST
+        # This must come before other styling to avoid ANSI interference
+        t = re.sub(r'\[([^\]]+)\]', lambda m: '[' + cls._style_text(m.group(1), 'green', '') + ']', t)
+
+        # Replace asterisk-surrounded text (from B() markup) - keep as is since 'bold' doesn't exist in COLOR_CODES
+        # t = re.sub(r'\*([^*]+)\*', lambda m: cls._style_text(m.group(1), 'bold', '*'), t)
 
         # Replace backtick-surrounded text (from I() and C() markup) with styling
         t = re.sub(r"`([^`']+)'", lambda m: cls._style_constant(m.group(1)), t)
-
-        # Replace bracketed text (from M() and P() markup) with plugin styling
-        t = re.sub(r'\[([^\]]+)\]', lambda m: '[' + cls._style_text(m.group(1), 'green', '') + ']', t)
 
         return t
 
@@ -649,8 +627,21 @@ class DocCLI(CLI, RoleMixin):
 
     def display_plugin_list(self, results):
 
-        # format for user
-        displace = max(len(x) for x in results.keys())
+        # format for user - calculate max width including ANSI codes
+        max_styled_width = 0
+        for plugin in results.keys():
+            # Calculate width including styling for both regular and deprecated plugins
+            if plugin.split('.')[-1].startswith('_') and plugin.startswith(('ansible.builtin.', 'ansible.legacy.')):
+                # Handle deprecated plugin styling
+                clean_plugin = '.'.join(plugin.split('.')[:-1] + [plugin.split('.')[-1][1:]])
+                styled = DocCLI._style_text(clean_plugin, 'yellow', '(deprecated) ')
+                styled_width = len(DocCLI._strip_ansi(styled))
+            else:
+                styled = DocCLI._style_text(plugin, 'green', '')
+                styled_width = len(DocCLI._strip_ansi(styled))
+            max_styled_width = max(max_styled_width, styled_width)
+
+        displace = max_styled_width
         linelimit = display.columns - displace - 5
         text = []
         deprecated = []
@@ -672,27 +663,22 @@ class DocCLI(CLI, RoleMixin):
         else:
             # list plugin names and short desc
             for plugin in sorted(results.keys()):
-                # Apply tty_ify first but NOT _enhanced_tty_ify to avoid ANSI issues
-                desc = DocCLI.tty_ify(results[plugin])
+                desc = DocCLI._enhanced_tty_ify(results[plugin])
 
-                # Truncate BEFORE applying enhanced styling to avoid splitting ANSI sequences
                 if len(desc) > linelimit:
                     desc = desc[:linelimit] + '...'
-
-                # Apply enhanced styling AFTER truncation
-                desc = DocCLI._enhanced_tty_ify(desc)
 
                 pbreak = plugin.split('.')
                 # TODO: add mark for deprecated collection plugins
                 if pbreak[-1].startswith('_') and plugin.startswith(('ansible.builtin.', 'ansible.legacy.')):
                     # Handle deprecated ansible.builtin plugins
                     pbreak[-1] = pbreak[-1][1:]
-                    clean_plugin = '.'.join(pbreak)
-                    # Style deprecated plugins with warning color AFTER column formatting
-                    styled_plugin = DocCLI._style_text(clean_plugin, 'bright yellow', '(deprecated) ')
+                    plugin = '.'.join(pbreak)
+                    # Style deprecated plugins with warning color
+                    styled_plugin = DocCLI._style_text(plugin, 'yellow', '(deprecated) ')
                     deprecated.append("%-*s %-*.*s" % (displace, styled_plugin, linelimit, len(desc), desc))
                 else:
-                    # Style regular plugins with green AFTER column formatting
+                    # Style regular plugins with green
                     styled_plugin = DocCLI._style_text(plugin, 'green', '')
                     text.append("%-*s %-*.*s" % (displace, styled_plugin, linelimit, len(desc), desc))
 
@@ -719,9 +705,16 @@ class DocCLI(CLI, RoleMixin):
         max_ep_len = 0
 
         if roles:
-            max_role_len = max(len(x) for x in roles)
+            # Calculate max width including styling for role names
+            max_role_len = max(len(DocCLI._strip_ansi(DocCLI._style_text(role, 'bright green', ''))) for role in roles)
+        else:
+            max_role_len = 0
+
         if entry_point_names:
-            max_ep_len = max(len(x) for x in entry_point_names)
+            # Calculate max width including styling for entry points
+            max_ep_len = max(len(DocCLI._strip_ansi(DocCLI._style_text(ep, 'cyan', ''))) for ep in entry_point_names)
+        else:
+            max_ep_len = 0
 
         linelimit = display.columns - max_role_len - max_ep_len - 5
         text = []
@@ -730,29 +723,21 @@ class DocCLI(CLI, RoleMixin):
             # Group entries under role name with better visual hierarchy
             first_entry = True
             for entry_point, desc in list_json[role]['entry_points'].items():
-                # Apply display placeholder for empty descriptions at display layer
-                if not desc:
-                    desc = 'No description available'
-
-                # Truncate BEFORE applying styling
                 if len(desc) > linelimit:
                     desc = desc[:linelimit] + '...'
-
-                # Apply enhanced styling AFTER truncation
-                styled_desc = DocCLI._enhanced_tty_ify(desc)
 
                 if first_entry:
                     # Style the role name prominently for the first entry
                     styled_role = DocCLI._style_text(role, 'bright green', '')
                     text.append("%-*s %-*s %s" % (max_role_len, styled_role,
                                                   max_ep_len, DocCLI._style_text(entry_point, 'cyan', ''),
-                                                  styled_desc))
+                                                  DocCLI._enhanced_tty_ify(desc)))
                     first_entry = False
                 else:
                     # Indent continuation entries under the same role
                     text.append("%-*s %-*s %s" % (max_role_len, '',
                                                   max_ep_len, DocCLI._style_text(entry_point, 'cyan', ''),
-                                                  styled_desc))
+                                                  DocCLI._enhanced_tty_ify(desc)))
 
         # display results
         DocCLI.pager("\n".join(text))
@@ -1278,7 +1263,10 @@ class DocCLI(CLI, RoleMixin):
                 opt_leadin = DocCLI._style_required("=")
                 field_name = DocCLI._style_text(o, 'bright yellow', '')
             else:
-                opt_leadin = "-"
+                # Pad optional leadin to match required field width in no-color mode
+                required_leadin = DocCLI._style_required("=")
+                required_width = len(DocCLI._strip_ansi(required_leadin))
+                opt_leadin = "-".ljust(required_width)
                 field_name = o
 
             text.append("%s%s %s" % (base_indent, opt_leadin, field_name))
@@ -1397,7 +1385,7 @@ class DocCLI(CLI, RoleMixin):
                                                       subsequent_indent=opt_indent))
             if doc.get('options'):
                 text.append(DocCLI._style_header("OPTIONS") + "\n")
-                text.append(DocCLI._style_text("(= is mandatory, - is optional)", 'bright yellow', '(!) ') + "\n")
+                text.append(DocCLI._style_text("(= is mandatory, - is optional)", 'yellow', '(!) ') + "\n")
                 DocCLI.add_fields(text, doc.pop('options'), limit, opt_indent)
                 text.append('')
 
@@ -1474,7 +1462,7 @@ class DocCLI(CLI, RoleMixin):
 
         if doc.get('options', False):
             text.append(DocCLI._style_header("OPTIONS") + "\n")
-            text.append(DocCLI._style_text("(= is mandatory, - is optional)", 'bright yellow', '(!) ') + "\n")
+            text.append(DocCLI._style_text("(= is mandatory, - is optional)", 'yellow', '(!) ') + "\n")
             DocCLI.add_fields(text, doc.pop('options'), limit, opt_indent)
             text.append('')
 
@@ -1495,68 +1483,61 @@ class DocCLI(CLI, RoleMixin):
             text.append(DocCLI._style_header("SEE ALSO") + "\n")
             for item in doc['seealso']:
                 if 'module' in item:
-                    module_text = 'Module ' + DocCLI._style_text(item['module'], 'green', '')
-                    text.append(DocCLI.warp_fill(module_text,
+                    text.append(DocCLI.warp_fill(DocCLI.tty_ify('Module %s' % item['module']),
                                 limit - 6, initial_indent=opt_indent[:-2] + "* ", subsequent_indent=opt_indent))
                     description = item.get('description')
                     if description is None and item['module'].startswith('ansible.builtin.'):
                         description = 'The official documentation on the %s module.' % item['module']
                     if description is not None:
-                        text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(description),
+                        text.append(DocCLI.warp_fill(DocCLI.tty_ify(description),
                                     limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
                     if item['module'].startswith('ansible.builtin.'):
                         relative_url = 'collections/%s_module.html' % item['module'].replace('.', '/', 2)
-                        styled_url = DocCLI._style_url(get_versioned_doclink(relative_url))
-                        text.append(DocCLI.warp_fill(styled_url,
+                        text.append(DocCLI.warp_fill(DocCLI.tty_ify(get_versioned_doclink(relative_url)),
                                     limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent))
                 elif 'plugin' in item and 'plugin_type' in item:
                     plugin_suffix = ' plugin' if item['plugin_type'] not in ('module', 'role') else ''
-                    plugin_text = '%s%s %s' % (item['plugin_type'].title(), plugin_suffix, DocCLI._style_text(item['plugin'], 'green', ''))
-                    text.append(DocCLI.warp_fill(plugin_text,
+                    text.append(DocCLI.warp_fill(DocCLI.tty_ify('%s%s %s' % (item['plugin_type'].title(), plugin_suffix, item['plugin'])),
                                 limit - 6, initial_indent=opt_indent[:-2] + "* ", subsequent_indent=opt_indent))
                     description = item.get('description')
                     if description is None and item['plugin'].startswith('ansible.builtin.'):
                         description = 'The official documentation on the %s %s%s.' % (item['plugin'], item['plugin_type'], plugin_suffix)
                     if description is not None:
-                        text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(description),
+                        text.append(DocCLI.warp_fill(DocCLI.tty_ify(description),
                                     limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
                     if item['plugin'].startswith('ansible.builtin.'):
                         relative_url = 'collections/%s_%s.html' % (item['plugin'].replace('.', '/', 2), item['plugin_type'])
-                        styled_url = DocCLI._style_url(get_versioned_doclink(relative_url))
-                        text.append(DocCLI.warp_fill(styled_url,
+                        text.append(DocCLI.warp_fill(DocCLI.tty_ify(get_versioned_doclink(relative_url)),
                                     limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent))
                 elif 'name' in item and 'link' in item and 'description' in item:
-                    text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(item['name']),
+                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(item['name']),
                                 limit - 6, initial_indent=opt_indent[:-2] + "* ", subsequent_indent=opt_indent))
-                    text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(item['description']),
+                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(item['description']),
                                 limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
-                    styled_link = DocCLI._style_url(item['link'])
-                    text.append(DocCLI.warp_fill(styled_link,
+                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(item['link']),
                                 limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
                 elif 'ref' in item and 'description' in item:
-                    ref_text = 'Ansible documentation [' + DocCLI._style_text(item['ref'], 'cyan', '') + ']'
-                    text.append(DocCLI.warp_fill(ref_text,
+                    text.append(DocCLI.warp_fill(DocCLI.tty_ify('Ansible documentation [%s]' % item['ref']),
                                 limit - 6, initial_indent=opt_indent[:-2] + "* ", subsequent_indent=opt_indent))
-                    text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(item['description']),
+                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(item['description']),
                                 limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
-                    styled_url = DocCLI._style_url(get_versioned_doclink('/#stq=%s&stp=1' % item['ref']))
-                    text.append(DocCLI.warp_fill(styled_url,
+                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(get_versioned_doclink('/#stq=%s&stp=1' % item['ref'])),
                                 limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
 
+            text.append('')
             text.append('')
             del doc['seealso']
 
         if doc.get('requirements', False):
             req = ", ".join(doc.pop('requirements'))
-            text.append(DocCLI._style_header("REQUIREMENTS") + "\n")
-            text.append("%s\n" % DocCLI.warp_fill(DocCLI._enhanced_tty_ify(req), limit, initial_indent=opt_indent, subsequent_indent=opt_indent))
+            text.append("REQUIREMENTS:%s\n" % DocCLI.warp_fill(DocCLI.tty_ify(req), limit - 16, initial_indent="  ", subsequent_indent=opt_indent))
 
         # Generic handler
         for k in sorted(doc):
             if k in DocCLI.IGNORE or not doc[k]:
                 continue
             if isinstance(doc[k], string_types):
-                text.append('%s: %s' % (k.upper(), DocCLI.warp_fill(DocCLI._enhanced_tty_ify(doc[k]), limit - (len(k) + 2), subsequent_indent=opt_indent)))
+                text.append('%s: %s' % (k.upper(), DocCLI.warp_fill(DocCLI.tty_ify(doc[k]), limit - (len(k) + 2), subsequent_indent=opt_indent)))
             elif isinstance(doc[k], (list, tuple)):
                 text.append('%s: %s' % (k.upper(), ', '.join(doc[k])))
             else:
@@ -1566,7 +1547,8 @@ class DocCLI(CLI, RoleMixin):
             text.append('')
 
         if doc.get('plainexamples', False):
-            text.append(DocCLI._style_header("EXAMPLES") + "\n")
+            text.append("EXAMPLES:")
+            text.append('')
             if isinstance(doc['plainexamples'], string_types):
                 text.append(doc.pop('plainexamples').strip())
             else:
@@ -1575,9 +1557,10 @@ class DocCLI(CLI, RoleMixin):
                 except Exception as e:
                     raise AnsibleParserError("Unable to parse examples section", orig_exc=e)
             text.append('')
+            text.append('')
 
         if doc.get('returndocs', False):
-            text.append(DocCLI._style_header("RETURN VALUES") + "\n")
+            text.append("RETURN VALUES:")
             DocCLI.add_fields(text, doc.pop('returndocs'), limit, opt_indent, return_values=True)
 
         return "\n".join(text)
