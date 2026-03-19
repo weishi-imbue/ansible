@@ -34,6 +34,8 @@ from ansible.module_utils.common.text.converters import to_bytes, to_native, to_
 from ansible.module_utils.common.collections import is_sequence
 from ansible.module_utils.common.yaml import yaml_load, yaml_load_all
 from ansible.parsing.yaml.dumper import AnsibleDumper
+from ansible._internal._yaml._loader import AnsibleInstrumentedLoader
+from ansible._internal._datatag._tags import Origin, TrustedAsTemplate
 from ansible.template import accept_args_markers, accept_lazy_markers
 from ansible._internal._templating._jinja_common import MarkerError, UndefinedMarker, validate_arg_type
 from ansible.utils.display import Display
@@ -246,15 +248,39 @@ def regex_escape(string, re_type='python'):
         raise AnsibleFilterError('Invalid regex type (%s)' % re_type)
 
 
+def _yaml_load_with_trust_and_origin(data_str, trusted_as_template=False):
+    """Load YAML with trust and origin preservation using AnsibleInstrumentedLoader."""
+    # Tag the data string if it's trusted as template
+    if trusted_as_template:
+        data_str = TrustedAsTemplate().tag(data_str)
+
+    # Use AnsibleInstrumentedLoader to preserve trust and origin
+    return yaml.load(data_str, Loader=AnsibleInstrumentedLoader)
+
+
+def _yaml_load_all_with_trust_and_origin(data_str, trusted_as_template=False):
+    """Load all YAML documents with trust and origin preservation using AnsibleInstrumentedLoader."""
+    # Tag the data string if it's trusted as template
+    if trusted_as_template:
+        data_str = TrustedAsTemplate().tag(data_str)
+
+    # Use AnsibleInstrumentedLoader to preserve trust and origin
+    return list(yaml.load_all(data_str, Loader=AnsibleInstrumentedLoader))
+
+
 def from_yaml(data):
     if data is None:
         return None
 
     if isinstance(data, string_types):
-        # The ``text_type`` call here strips any custom
-        # string wrapper class, so that CSafeLoader can
-        # read the data
-        return yaml_load(text_type(to_text(data, errors='surrogate_or_strict')))
+        # Convert to text while preserving trust information
+        data_str = text_type(to_text(data, errors='surrogate_or_strict'))
+
+        # Check if the original data is trusted as template
+        trusted_as_template = TrustedAsTemplate.is_tagged_on(data)
+
+        # Use AnsibleInstrumentedLoader to preserve trust and origin information
+        return _yaml_load_with_trust_and_origin(data_str, trusted_as_template)
 
     display.deprecated(f"The from_yaml filter ignored non-string input of type {native_type_name(data)!r}.", version='2.23', obj=data)
     return data
@@ -265,10 +291,14 @@ def from_yaml_all(data):
         return []  # backward compatibility; ensure consistent result between classic/native Jinja for None/empty string input
 
     if isinstance(data, string_types):
-        # The ``text_type`` call here strips any custom
-        # string wrapper class, so that CSafeLoader can
-        # read the data
-        return yaml_load_all(text_type(to_text(data, errors='surrogate_or_strict')))
+        # Convert to text while preserving trust information
+        data_str = text_type(to_text(data, errors='surrogate_or_strict'))
+
+        # Check if the original data is trusted as template
+        trusted_as_template = TrustedAsTemplate.is_tagged_on(data)
+
+        # Use AnsibleInstrumentedLoader to preserve trust and origin information
+        return _yaml_load_all_with_trust_and_origin(data_str, trusted_as_template)
 
     display.deprecated(f"The from_yaml_all filter ignored non-string input of type {native_type_name(data)!r}.", version='2.23', obj=data)
     return data
