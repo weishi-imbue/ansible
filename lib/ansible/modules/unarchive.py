@@ -319,6 +319,45 @@ class ZipArchive(object):
             ('zipinfo', 'zipinfo_cmd_path'),
         )
 
+    def _valid_time_stamp(self, timestamp_str):
+        """
+        Validates and sanitizes ZIP file timestamps before processing them.
+
+        Args:
+            timestamp_str: Timestamp string from ZIP file in YYYYMMDD.HHMMSS format
+
+        Returns:
+            A time tuple (year, month, day, hour, minute, second, 0, 0, 0)
+            that can be used with datetime.datetime()
+        """
+        # Use regex to extract date components from YYYYMMDD.HHMMSS format
+        timestamp_pattern = r'^(\d{4})(\d{2})(\d{2})\.(\d{2})(\d{2})(\d{2})$'
+        match = re.match(timestamp_pattern, str(timestamp_str))
+
+        if not match:
+            # Return default epoch time (1980,1,1,0,0,0,0,0,0) for invalid format
+            return (1980, 1, 1, 0, 0, 0, 0, 0, 0)
+
+        year, month, day, hour, minute, second = map(int, match.groups())
+
+        # Establish valid year limits between 1980 and 2107 for ZIP file timestamps
+        if year < 1980 or year > 2107:
+            return (1980, 1, 1, 0, 0, 0, 0, 0, 0)
+
+        # Validate month, day, hour, minute, second ranges
+        if not (1 <= month <= 12):
+            return (1980, 1, 1, 0, 0, 0, 0, 0, 0)
+        if not (1 <= day <= 31):
+            return (1980, 1, 1, 0, 0, 0, 0, 0, 0)
+        if not (0 <= hour <= 23):
+            return (1980, 1, 1, 0, 0, 0, 0, 0, 0)
+        if not (0 <= minute <= 59):
+            return (1980, 1, 1, 0, 0, 0, 0, 0, 0)
+        if not (0 <= second <= 59):
+            return (1980, 1, 1, 0, 0, 0, 0, 0, 0)
+
+        return (year, month, day, hour, minute, second, 0, 0, 0)
+
     def _permstr_to_octal(self, modestr, umask):
         ''' Convert a Unix permission string (rw-r--r--) into a mode (0644) '''
         revstr = modestr[::-1]
@@ -602,7 +641,8 @@ class ZipArchive(object):
             # Note: this timestamp calculation has a rounding error
             # somewhere... unzip and this timestamp can be one second off
             # When that happens, we report a change and re-unzip the file
-            dt_object = datetime.datetime(*(time.strptime(pcs[6], '%Y%m%d.%H%M%S')[0:6]))
+            valid_time_tuple = self._valid_time_stamp(pcs[6])
+            dt_object = datetime.datetime(*valid_time_tuple[0:6])
             timestamp = time.mktime(dt_object.timetuple())
 
             # Compare file timestamps
