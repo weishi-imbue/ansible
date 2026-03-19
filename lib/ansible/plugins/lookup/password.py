@@ -366,6 +366,9 @@ class LookupModule(LookupBase):
             # If ident was provided by user but not in file, mark as changed
             if encrypt == 'bcrypt' and params['ident'] is not None and file_ident != params['ident']:
                 changed = True
+                # When switching to bcrypt, ensure the salt is compatible (22 chars for bcrypt)
+                if salt and len(salt) != 22:
+                    salt = random_salt(22)
 
             if changed and b_path != to_bytes('/dev/null'):
                 content = _format_content(plaintext_password, salt, encrypt=encrypt, ident=ident)
