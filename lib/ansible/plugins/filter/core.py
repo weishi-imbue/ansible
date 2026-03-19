@@ -32,7 +32,6 @@ from ansible.module_utils.common.json import get_encoder, get_decoder
 from ansible.module_utils.six import string_types, integer_types, text_type
 from ansible.module_utils.common.text.converters import to_bytes, to_native, to_text
 from ansible.module_utils.common.collections import is_sequence
-from ansible.module_utils.common.yaml import yaml_load, yaml_load_all
 from ansible.parsing.yaml.dumper import AnsibleDumper
 from ansible._internal._yaml._loader import AnsibleInstrumentedLoader
 from ansible.template import accept_args_markers, accept_lazy_markers

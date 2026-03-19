@@ -64,17 +64,15 @@ class AnsibleDumper(_BaseDumper):
 
                 return self.represent_scalar('!vault', ciphertext, style='|')
             else:
-                # dump_vault_tags=False, check if this is an undecryptable vault value
-                if isinstance(data, _jinja_common.VaultExceptionMarker):
-                    raise AnsibleTemplateError("Cannot dump undecryptable vault value to YAML")
-
-                # For other vault values, try to decrypt them
+                # dump_vault_tags=False, try to decrypt the vault value
                 try:
                     decrypted = AnsibleTagHelper.as_native_type(data)  # automatically decrypts encrypted strings
-                    return self.represent_data(decrypted)
                 except Exception:
                     # If decryption fails, this is an undecryptable vault value
                     raise AnsibleTemplateError("Cannot dump undecryptable vault value to YAML")
+
+                # If decryption succeeded, represent the decrypted data
+                return self.represent_data(decrypted)
 
         return self.represent_data(AnsibleTagHelper.as_native_type(data))  # automatically decrypts encrypted strings
 
@@ -92,7 +90,9 @@ class AnsibleDumper(_BaseDumper):
 
     def represent_undefined_marker(self, data: _jinja_common.UndefinedMarker):
         """Handle UndefinedMarker objects which represent undefined variables."""
-        raise AnsibleUndefinedVariable("Cannot dump undefined variable to YAML")
+        # Use MarkerError for backward compatibility with existing tests
+        from ansible._internal._templating._jinja_common import MarkerError
+        raise MarkerError("Cannot dump undefined variable to YAML", data)
 
     def represent_generic_marker(self, data: _jinja_common.Marker):
         """Handle generic Marker objects by tripping them to raise appropriate errors."""
