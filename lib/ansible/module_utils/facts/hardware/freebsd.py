@@ -19,11 +19,13 @@ __metaclass__ = type
 import os
 import json
 import re
+import time
 
 from ansible.module_utils.facts.hardware.base import Hardware, HardwareCollector
 from ansible.module_utils.facts.timeout import TimeoutError, timeout
 
 from ansible.module_utils.facts.utils import get_file_content, get_mount_size
+from ansible.module_utils.facts.sysctl import get_sysctl_boottime
 
 
 class FreeBSDHardware(Hardware):
@@ -48,6 +50,7 @@ class FreeBSDHardware(Hardware):
         memory_facts = self.get_memory_facts()
         dmi_facts = self.get_dmi_facts()
         device_facts = self.get_device_facts()
+        uptime_facts = self.get_uptime_facts()
 
         mount_facts = {}
         try:
@@ -60,6 +63,7 @@ class FreeBSDHardware(Hardware):
         hardware_facts.update(dmi_facts)
         hardware_facts.update(device_facts)
         hardware_facts.update(mount_facts)
+        hardware_facts.update(uptime_facts)
 
         return hardware_facts
 
@@ -207,6 +211,20 @@ class FreeBSDHardware(Hardware):
                 dmi_facts[k] = 'NA'
 
         return dmi_facts
+
+    def get_uptime_facts(self):
+        uptime_facts = {}
+
+        try:
+            boottime = get_sysctl_boottime(self.module)
+            if boottime is not None:
+                # uptime = $current_time - $boot_time
+                uptime_facts['uptime_seconds'] = int(time.time() - boottime)
+        except ValueError:
+            # sysctl command not found, skip uptime facts
+            pass
+
+        return uptime_facts
 
 
 class FreeBSDHardwareCollector(HardwareCollector):
