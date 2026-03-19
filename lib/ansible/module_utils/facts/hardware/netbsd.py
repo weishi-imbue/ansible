@@ -18,6 +18,7 @@ __metaclass__ = type
 
 import os
 import re
+import time
 
 from ansible.module_utils.six.moves import reduce
 
@@ -25,7 +26,7 @@ from ansible.module_utils.facts.hardware.base import Hardware, HardwareCollector
 from ansible.module_utils.facts.timeout import TimeoutError, timeout
 
 from ansible.module_utils.facts.utils import get_file_content, get_file_lines, get_mount_size
-from ansible.module_utils.facts.sysctl import get_sysctl
+from ansible.module_utils.facts.sysctl import get_sysctl, get_sysctl_boottime
 
 
 class NetBSDHardware(Hardware):
@@ -45,9 +46,10 @@ class NetBSDHardware(Hardware):
 
     def populate(self, collected_facts=None):
         hardware_facts = {}
-        self.sysctl = get_sysctl(self.module, ['machdep'])
+        self.sysctl = get_sysctl(self.module, ['machdep', 'kern'])
         cpu_facts = self.get_cpu_facts()
         memory_facts = self.get_memory_facts()
+        uptime_facts = self.get_uptime_facts()
 
         mount_facts = {}
         try:
@@ -61,6 +63,7 @@ class NetBSDHardware(Hardware):
         hardware_facts.update(memory_facts)
         hardware_facts.update(mount_facts)
         hardware_facts.update(dmi_facts)
+        hardware_facts.update(uptime_facts)
 
         return hardware_facts
 
@@ -155,6 +158,20 @@ class NetBSDHardware(Hardware):
                 dmi_facts[sysctl_to_dmi[mib]] = self.sysctl[mib]
 
         return dmi_facts
+
+    def get_uptime_facts(self):
+        uptime_facts = {}
+
+        try:
+            boottime = get_sysctl_boottime(self.module)
+            if boottime is not None:
+                # uptime = $current_time - $boot_time
+                uptime_facts['uptime_seconds'] = int(time.time() - boottime)
+        except ValueError:
+            # sysctl command not found, skip uptime facts
+            pass
+
+        return uptime_facts
 
 
 class NetBSDHardwareCollector(HardwareCollector):
