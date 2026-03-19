@@ -262,6 +262,18 @@ DOCUMENTATION = '''
         vars:
           - name: ansible_scp_if_ssh
             version_added: '2.7'
+      transfer_method:
+        description:
+          - "Method to use when transfering files over ssh"
+          - "This takes precedence over scp_if_ssh when set"
+          - When set to smart, Ansible will try them until one succeeds or they all fail
+          - If set to True, it will force 'scp', if False it will use 'sftp'
+        choices: ['sftp', 'scp', 'piped', 'smart']
+        env: [{name: ANSIBLE_SSH_TRANSFER_METHOD}]
+        ini:
+        - {key: transfer_method, section: ssh_connection}
+        vars:
+          - name: ansible_ssh_transfer_method
       use_tty:
         version_added: '2.5'
         default: 'yes'
@@ -388,7 +400,7 @@ def _ssh_retry(func):
     """
     @wraps(func)
     def wrapped(self, *args, **kwargs):
-        remaining_tries = int(C.ANSIBLE_SSH_RETRIES) + 1
+        remaining_tries = int(self.get_option('retries')) + 1
         cmd_summary = u"%s..." % to_text(args[0])
         conn_password = self.get_option('password') or self._play_context.password
         for attempt in range(remaining_tries):
@@ -462,10 +474,10 @@ class Connection(ConnectionBase):
         super(Connection, self).__init__(*args, **kwargs)
 
         self.host = self._play_context.remote_addr
-        self.port = self._play_context.port
-        self.user = self._play_context.remote_user
-        self.control_path = C.ANSIBLE_SSH_CONTROL_PATH
-        self.control_path_dir = C.ANSIBLE_SSH_CONTROL_PATH_DIR
+        self.port = self.get_option('port') or self._play_context.port
+        self.user = self.get_option('remote_user') or self._play_context.remote_user
+        self.control_path = self.get_option('control_path')
+        self.control_path_dir = self.get_option('control_path_dir')
 
         # Windows operates differently from a POSIX connection/shell plugin,
         # we need to set various properties to ensure SSH on Windows continues
@@ -593,7 +605,7 @@ class Connection(ConnectionBase):
         # be disabled if the client side doesn't support the option. However,
         # sftp batch mode does not prompt for passwords so it must be disabled
         # if not using controlpersist and using sshpass
-        if subsystem == 'sftp' and C.DEFAULT_SFTP_BATCH_MODE:
+        if subsystem == 'sftp' and self.get_option('sftp_batch_mode'):
             if conn_password:
                 b_args = [b'-o', b'BatchMode=no']
                 self._add_args(b_command, b_args, u'disable batch mode for sshpass')
@@ -616,15 +628,16 @@ class Connection(ConnectionBase):
         # (e.g. host_key_checking) or inventory variables (ansible_ssh_port) or
         # a combination thereof.
 
-        if not C.HOST_KEY_CHECKING:
+        if not self.get_option('host_key_checking'):
             b_args = (b"-o", b"StrictHostKeyChecking=no")
             self._add_args(b_command, b_args, u"ANSIBLE_HOST_KEY_CHECKING/host_key_checking disabled")
 
-        if self._play_context.port is not None:
-            b_args = (b"-o", b"Port=" + to_bytes(self._play_context.port, nonstring='simplerepr', errors='surrogate_or_strict'))
+        port = self.get_option('port')
+        if port is not None:
+            b_args = (b"-o", b"Port=" + to_bytes(port, nonstring='simplerepr', errors='surrogate_or_strict'))
             self._add_args(b_command, b_args, u"ANSIBLE_REMOTE_PORT/remote_port/ansible_port set")
 
-        key = self._play_context.private_key_file
+        key = self.get_option('private_key_file')
         if key:
             b_args = (b"-o", b'IdentityFile="' + to_bytes(os.path.expanduser(key), errors='surrogate_or_strict') + b'"')
             self._add_args(b_command, b_args, u"ANSIBLE_PRIVATE_KEY_FILE/private_key_file/ansible_ssh_private_key_file set")
@@ -639,11 +652,11 @@ class Connection(ConnectionBase):
                 u"ansible_password/ansible_ssh_password not set"
             )
 
-        user = self._play_context.remote_user
+        user = self.get_option('remote_user')
         if user:
             self._add_args(
                 b_command,
-                (b"-o", b'User="%s"' % to_bytes(self._play_context.remote_user, errors='surrogate_or_strict')),
+                (b"-o", b'User="%s"' % to_bytes(user, errors='surrogate_or_strict')),
                 u"ANSIBLE_REMOTE_USER/remote_user/ansible_user/user/-u set"
             )
 
@@ -653,14 +666,14 @@ class Connection(ConnectionBase):
             u"ANSIBLE_TIMEOUT/timeout set"
         )
 
-        # Add in any common or binary-specific arguments from the PlayContext
-        # (i.e. inventory or task settings or overrides on the command line).
+        # Add in any common or binary-specific arguments resolved via plugin options
+        # (i.e. configuration, environment, inventory, task settings, or CLI overrides).
 
         for opt in (u'ssh_common_args', u'{0}_extra_args'.format(subsystem)):
-            attr = getattr(self._play_context, opt, None)
+            attr = self.get_option(opt)
             if attr is not None:
                 b_args = [to_bytes(a, errors='surrogate_or_strict') for a in self._split_ssh_args(attr)]
-                self._add_args(b_command, b_args, u"PlayContext set %s" % opt)
+                self._add_args(b_command, b_args, u"get_option retrieved %s" % opt)
 
         # Check if ControlPersist is enabled and add a ControlPath if one hasn't
         # already been set.
@@ -1047,7 +1060,7 @@ class Connection(ConnectionBase):
             p.stdout.close()
             p.stderr.close()
 
-        if C.HOST_KEY_CHECKING:
+        if self.get_option('host_key_checking'):
             if cmd[0] == b"sshpass" and p.returncode == 6:
                 raise AnsibleError('Using a SSH password instead of a key is not possible because Host Key checking is enabled and sshpass does not support '
                                    'this.  Please add this host\'s fingerprint to your known_hosts file to manage this host.')
@@ -1094,7 +1107,7 @@ class Connection(ConnectionBase):
         methods = []
 
         # Use the transfer_method option if set, otherwise use scp_if_ssh
-        ssh_transfer_method = self._play_context.ssh_transfer_method
+        ssh_transfer_method = self.get_option('transfer_method')
         if ssh_transfer_method is not None:
             if not (ssh_transfer_method in ('smart', 'sftp', 'scp', 'piped')):
                 raise AnsibleOptionsError('transfer_method needs to be one of [smart|sftp|scp|piped]')
@@ -1104,7 +1117,7 @@ class Connection(ConnectionBase):
                 methods = [ssh_transfer_method]
         else:
             # since this can be a non-bool now, we need to handle it correctly
-            scp_if_ssh = C.DEFAULT_SCP_IF_SSH
+            scp_if_ssh = self.get_option('scp_if_ssh')
             if not isinstance(scp_if_ssh, bool):
                 scp_if_ssh = scp_if_ssh.lower()
                 if scp_if_ssh in BOOLEANS:
@@ -1203,7 +1216,7 @@ class Connection(ConnectionBase):
         # python interactive-mode but the modules are not compatible with the
         # interactive-mode ("unexpected indent" mainly because of empty lines)
 
-        ssh_executable = self.get_option('ssh_executable') or self._play_context.ssh_executable
+        ssh_executable = self.get_option('ssh_executable') or 'ssh'
 
         # -tt can cause various issues in some environments so allow the user
         # to disable it as a troubleshooting method.
@@ -1252,7 +1265,9 @@ class Connection(ConnectionBase):
 
     def reset(self):
         # If we have a persistent ssh connection (ControlPersist), we can ask it to stop listening.
-        cmd = self._build_command(self.get_option('ssh_executable') or self._play_context.ssh_executable, 'ssh', '-O', 'stop', self.host)
+        # Use the same effective parameters as the connection to ensure socket detection works correctly
+        ssh_executable = self.get_option('ssh_executable') or 'ssh'
+        cmd = self._build_command(ssh_executable, 'ssh', '-O', 'stop', self.host)
         controlpersist, controlpath = self._persistence_controls(cmd)
         cp_arg = [a for a in cmd if a.startswith(b"ControlPath=")]
 
@@ -1263,8 +1278,12 @@ class Connection(ConnectionBase):
             cp_path = cp_arg[0].split(b"=", 1)[-1]
             if os.path.exists(cp_path):
                 run_reset = True
+                display.debug(u'persistent SSH connection socket exists at %s' % to_native(cp_path))
+            else:
+                display.debug(u'persistent SSH connection socket does not exist at %s, skipping reset' % to_native(cp_path))
         elif controlpersist:
             run_reset = True
+            display.debug(u'ControlPersist detected but no explicit ControlPath, proceeding with reset')
 
         if run_reset:
             display.vvv(u'sending stop: %s' % to_text(cmd))
@@ -1273,6 +1292,8 @@ class Connection(ConnectionBase):
             status_code = p.wait()
             if status_code != 0:
                 display.warning(u"Failed to reset connection:%s" % to_text(stderr))
+        else:
+            display.debug(u'no persistent SSH connection detected, skipping reset')
 
         self.close()
 
