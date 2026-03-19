@@ -126,8 +126,18 @@ def add_fragments(doc, filename, fragment_loader, is_module=False):
 
     fragments = doc.pop('extends_documentation_fragment', [])
 
+    # Handle both list and string formats, including comma-separated strings
     if isinstance(fragments, string_types):
-        fragments = [fragments]
+        # Check if it's a comma-separated string and split it
+        if ',' in fragments:
+            # Split by comma and trim whitespace from each fragment
+            fragments = [fragment.strip() for fragment in fragments.split(',') if fragment.strip()]
+        else:
+            fragments = [fragments]
+    elif fragments:
+        # If it's already a list, ensure all items are stripped of whitespace
+        fragments = [fragment.strip() if isinstance(fragment, string_types) else fragment
+                   for fragment in fragments if fragment]
 
     unknown_fragments = []
 
