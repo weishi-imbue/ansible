@@ -38,6 +38,7 @@ from ansible.plugins.list import list_plugins
 from ansible.plugins.loader import action_loader, fragment_loader
 from ansible.utils.collection_loader import AnsibleCollectionConfig, AnsibleCollectionRef
 from ansible.utils.collection_loader._collection_finder import _get_collection_name_from_path
+from ansible.utils.color import stringc
 from ansible.utils.display import Display
 from ansible.utils.plugin_docs import get_plugin_docs, get_docstring, get_versioned_doclink
 
@@ -113,6 +114,10 @@ class RoleMixin(object):
                 return data.get('argument_specs', {})
         except (IOError, OSError) as e:
             raise AnsibleParserError("An error occurred while trying to read the file '%s': %s" % (path, to_native(e)), orig_exc=e)
+        except Exception as e:
+            # Gracefully handle malformed YAML or other parsing errors
+            display.warning("Unable to parse role metadata file '%s': %s. Skipping." % (path, to_native(e)))
+            return {}
 
     def _find_all_normal_roles(self, role_paths, name_filters=None):
         """Find all non-collection roles that have an argument spec file.
@@ -209,9 +214,20 @@ class RoleMixin(object):
         summary = {}
         summary['collection'] = collection
         summary['entry_points'] = {}
-        for ep in argspec.keys():
-            entry_spec = argspec[ep] or {}
-            summary['entry_points'][ep] = entry_spec.get('short_description', '')
+
+        try:
+            for ep in argspec.keys():
+                entry_spec = argspec[ep] or {}
+                if isinstance(entry_spec, dict):
+                    summary['entry_points'][ep] = entry_spec.get('short_description', 'No description available')
+                else:
+                    # Handle malformed entry spec gracefully
+                    summary['entry_points'][ep] = 'Invalid entry point specification'
+        except Exception as e:
+            # Fallback for severely malformed argspec
+            display.warning("Error processing role '%s' argspec: %s. Using placeholder description." % (fqcn, to_native(e)))
+            summary['entry_points']['main'] = 'Role documentation unavailable due to metadata errors'
+
         return (fqcn, summary)
 
     def _build_doc(self, role, path, collection, argspec, entry_point):
@@ -223,10 +239,20 @@ class RoleMixin(object):
         doc['path'] = path
         doc['collection'] = collection
         doc['entry_points'] = {}
-        for ep in argspec.keys():
-            if entry_point is None or ep == entry_point:
-                entry_spec = argspec[ep] or {}
-                doc['entry_points'][ep] = entry_spec
+
+        try:
+            for ep in argspec.keys():
+                if entry_point is None or ep == entry_point:
+                    entry_spec = argspec[ep] or {}
+                    if isinstance(entry_spec, dict):
+                        doc['entry_points'][ep] = entry_spec
+                    else:
+                        # Handle malformed entry spec gracefully
+                        display.warning("Malformed entry spec for role '%s' entry point '%s'. Using placeholder." % (fqcn, ep))
+                        doc['entry_points'][ep] = {'short_description': 'Invalid entry point specification'}
+        except Exception as e:
+            display.warning("Error processing role '%s' entry points: %s. Using placeholder." % (fqcn, to_native(e)))
+            doc['entry_points']['main'] = {'short_description': 'Role documentation unavailable due to metadata errors'}
 
         # If we didn't add any entry points (b/c of filtering), ignore this entry.
         if len(doc['entry_points'].keys()) == 0:
@@ -444,6 +470,92 @@ class DocCLI(CLI, RoleMixin):
 
         return t
 
+    @classmethod
+    def _style_text(cls, text, style_type='', fallback_marker='', no_color=None):
+        """Apply ANSI styling with no-color fallbacks.
+
+        :param text: Text to style
+        :param style_type: Style to apply ('bold', 'underline', 'green', 'yellow', 'red', 'cyan', 'bright_blue')
+        :param fallback_marker: Text marker to use when colors are disabled
+        :param no_color: Override color detection (for testing)
+        :returns: Styled text string
+        """
+        if no_color is None:
+            # Check if colors are available - use same logic as ansible.utils.color
+            try:
+                from ansible.utils.color import ANSIBLE_COLOR
+                has_color = ANSIBLE_COLOR
+            except ImportError:
+                has_color = False
+        else:
+            has_color = not no_color
+
+        if not text:
+            return text
+
+        if has_color and style_type:
+            return stringc(text, style_type)
+        elif fallback_marker:
+            return fallback_marker + text + fallback_marker
+        else:
+            return text
+
+    @classmethod
+    def _style_header(cls, text, level=1):
+        """Style section headers with visual hierarchy.
+
+        :param text: Header text
+        :param level: Header level (1=major sections, 2=subsections)
+        :returns: Styled header
+        """
+        if level == 1:
+            # Major sections like OPTIONS, NOTES, SEE ALSO
+            styled = cls._style_text(text, 'bright_blue', '=== ', no_color=None)
+            return styled + "\n" + cls._style_text("-" * len(text), 'bright_blue', '', no_color=None)
+        else:
+            # Subsections like suboptions
+            return cls._style_text(text, 'cyan', '--- ')
+
+    @classmethod
+    def _style_required(cls, text):
+        """Style required field indicators."""
+        return cls._style_text(text, 'yellow', '(!) ')
+
+    @classmethod
+    def _style_plugin_name(cls, text):
+        """Style plugin/role names."""
+        return cls._style_text(text, 'bright_green', '>>> ')
+
+    @classmethod
+    def _style_url(cls, url):
+        """Style URLs and links."""
+        return cls._style_text(url, 'bright_cyan', '<', no_color=None) + (cls._style_text('', '', '>', no_color=None) if url else '')
+
+    @classmethod
+    def _style_constant(cls, text):
+        """Style constants, file paths, and code."""
+        return cls._style_text(text, 'bright_magenta', '`', no_color=None) + (cls._style_text('', '', "'", no_color=None) if text else '')
+
+    @classmethod
+    def _enhanced_tty_ify(cls, text):
+        """Enhanced version of tty_ify with better styling."""
+        # First apply the original tty_ify transformations
+        t = cls.tty_ify(text)
+
+        # Then enhance specific patterns with colors (if available)
+        # This preserves the ASCII fallbacks from tty_ify but adds colors when possible
+
+        # Replace asterisk-surrounded text (from B() markup) with bold
+        t = re.sub(r'\*([^*]+)\*', lambda m: cls._style_text(m.group(1), 'bold', '*'), t)
+
+        # Replace backtick-surrounded text (from I() and C() markup) with styling
+        t = re.sub(r"`([^`']+)'", lambda m: cls._style_constant(m.group(1)), t)
+
+        # Replace bracketed text (from M() and P() markup) with plugin styling
+        t = re.sub(r'\[([^\]]+)\]', lambda m: '[' + cls._style_text(m.group(1), 'green', '') + ']', t)
+
+        return t
+
     def init_parser(self):
 
         coll_filter = 'A supplied argument will be used for filtering, can be a namespace or full collection name.'
@@ -528,7 +640,7 @@ class DocCLI(CLI, RoleMixin):
         else:
             # list plugin names and short desc
             for plugin in sorted(results.keys()):
-                desc = DocCLI.tty_ify(results[plugin])
+                desc = DocCLI._enhanced_tty_ify(results[plugin])
 
                 if len(desc) > linelimit:
                     desc = desc[:linelimit] + '...'
@@ -539,12 +651,17 @@ class DocCLI(CLI, RoleMixin):
                     # Handle deprecated ansible.builtin plugins
                     pbreak[-1] = pbreak[-1][1:]
                     plugin = '.'.join(pbreak)
-                    deprecated.append("%-*s %-*.*s" % (displace, plugin, linelimit, len(desc), desc))
+                    # Style deprecated plugins with warning color
+                    styled_plugin = DocCLI._style_text(plugin, 'yellow', '(deprecated) ')
+                    deprecated.append("%-*s %-*.*s" % (displace, styled_plugin, linelimit, len(desc), desc))
                 else:
-                    text.append("%-*s %-*.*s" % (displace, plugin, linelimit, len(desc), desc))
+                    # Style regular plugins with green
+                    styled_plugin = DocCLI._style_text(plugin, 'green', '')
+                    text.append("%-*s %-*.*s" % (displace, styled_plugin, linelimit, len(desc), desc))
 
         if len(deprecated) > 0:
-            text.append("\nDEPRECATED:")
+            text.append("")
+            text.append(DocCLI._style_header("DEPRECATED", level=1))
             text.extend(deprecated)
 
         # display results
@@ -573,12 +690,24 @@ class DocCLI(CLI, RoleMixin):
         text = []
 
         for role in sorted(roles):
+            # Group entries under role name with better visual hierarchy
+            first_entry = True
             for entry_point, desc in list_json[role]['entry_points'].items():
                 if len(desc) > linelimit:
                     desc = desc[:linelimit] + '...'
-                text.append("%-*s %-*s %s" % (max_role_len, role,
-                                              max_ep_len, entry_point,
-                                              desc))
+
+                if first_entry:
+                    # Style the role name prominently for the first entry
+                    styled_role = DocCLI._style_text(role, 'bright_green', '')
+                    text.append("%-*s %-*s %s" % (max_role_len, styled_role,
+                                                  max_ep_len, DocCLI._style_text(entry_point, 'cyan', ''),
+                                                  DocCLI._enhanced_tty_ify(desc)))
+                    first_entry = False
+                else:
+                    # Indent continuation entries under the same role
+                    text.append("%-*s %-*s %s" % (max_role_len, '',
+                                                  max_ep_len, DocCLI._style_text(entry_point, 'cyan', ''),
+                                                  DocCLI._enhanced_tty_ify(desc)))
 
         # display results
         DocCLI.pager("\n".join(text))
@@ -1060,10 +1189,33 @@ class DocCLI(CLI, RoleMixin):
 
     @staticmethod
     def warp_fill(text, limit, initial_indent='', subsequent_indent='', **kwargs):
+        """Enhanced text wrapping that avoids mid-word breaks and handles edge cases."""
         result = []
+
+        # Ensure we don't break words unless absolutely necessary
+        kwargs.setdefault('break_long_words', False)
+        kwargs.setdefault('break_on_hyphens', False)
+
         for paragraph in text.split('\n\n'):
-            result.append(textwrap.fill(paragraph, limit, initial_indent=initial_indent, subsequent_indent=subsequent_indent, **kwargs))
+            if not paragraph.strip():
+                result.append('')
+                continue
+
+            try:
+                wrapped = textwrap.fill(paragraph, limit, initial_indent=initial_indent,
+                                     subsequent_indent=subsequent_indent, **kwargs)
+                result.append(wrapped)
+            except Exception:
+                # Fallback for edge cases - just indent without wrapping
+                lines = paragraph.split('\n')
+                wrapped_lines = []
+                for i, line in enumerate(lines):
+                    indent = initial_indent if i == 0 else subsequent_indent
+                    wrapped_lines.append(indent + line)
+                result.append('\n'.join(wrapped_lines))
+
             initial_indent = subsequent_indent
+
         return '\n'.join(result)
 
     @staticmethod
@@ -1078,11 +1230,13 @@ class DocCLI(CLI, RoleMixin):
             if not isinstance(required, bool):
                 raise AnsibleError("Incorrect value for 'Required', a boolean is needed.: %s" % required)
             if required:
-                opt_leadin = "="
+                opt_leadin = DocCLI._style_required("=")
+                field_name = DocCLI._style_text(o, 'bright_yellow', '')
             else:
                 opt_leadin = "-"
+                field_name = o
 
-            text.append("%s%s %s" % (base_indent, opt_leadin, o))
+            text.append("%s%s %s" % (base_indent, opt_leadin, field_name))
 
             # description is specifically formated and can either be string or list of strings
             if 'description' not in opt:
@@ -1091,11 +1245,11 @@ class DocCLI(CLI, RoleMixin):
                 for entry_idx, entry in enumerate(opt['description'], 1):
                     if not isinstance(entry, string_types):
                         raise AnsibleError("Expected string in description of %s at index %s, got %s" % (o, entry_idx, type(entry)))
-                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(entry), limit, initial_indent=opt_indent, subsequent_indent=opt_indent))
+                    text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(entry), limit, initial_indent=opt_indent, subsequent_indent=opt_indent))
             else:
                 if not isinstance(opt['description'], string_types):
                     raise AnsibleError("Expected string in description of %s, got %s" % (o, type(opt['description'])))
-                text.append(DocCLI.warp_fill(DocCLI.tty_ify(opt['description']), limit, initial_indent=opt_indent, subsequent_indent=opt_indent))
+                text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(opt['description']), limit, initial_indent=opt_indent, subsequent_indent=opt_indent))
             del opt['description']
 
             suboptions = []
@@ -1150,7 +1304,8 @@ class DocCLI(CLI, RoleMixin):
 
             for subkey, subdata in suboptions:
                 text.append('')
-                text.append("%s%s:\n" % (opt_indent, subkey.upper()))
+                subheader = DocCLI._style_header(subkey.upper(), level=2)
+                text.append("%s%s\n" % (opt_indent, subheader))
                 DocCLI.add_fields(text, subdata, limit, opt_indent + '    ', return_values, opt_indent)
             if not suboptions:
                 text.append('')
@@ -1171,15 +1326,20 @@ class DocCLI(CLI, RoleMixin):
         pad = display.columns * 0.20
         limit = max(display.columns - int(pad), 70)
 
-        text.append("> %s    (%s)\n" % (role.upper(), role_json.get('path')))
+        # Style the role name with enhanced formatting
+        styled_role = DocCLI._style_plugin_name(role.upper())
+        text.append("%s    (%s)\n" % (styled_role, role_json.get('path')))
 
         for entry_point in role_json['entry_points']:
             doc = role_json['entry_points'][entry_point]
 
+            # Style entry point header
             if doc.get('short_description'):
-                text.append("ENTRY POINT: %s - %s\n" % (entry_point, doc.get('short_description')))
+                entry_header = "ENTRY POINT: %s - %s" % (DocCLI._style_text(entry_point, 'cyan', ''), doc.get('short_description'))
+                text.append(entry_header + "\n")
             else:
-                text.append("ENTRY POINT: %s\n" % entry_point)
+                entry_header = "ENTRY POINT: %s" % DocCLI._style_text(entry_point, 'cyan', '')
+                text.append(entry_header + "\n")
 
             if doc.get('description'):
                 if isinstance(doc['description'], list):
@@ -1187,16 +1347,17 @@ class DocCLI(CLI, RoleMixin):
                 else:
                     desc = doc['description']
 
-                text.append("%s\n" % DocCLI.warp_fill(DocCLI.tty_ify(desc),
+                text.append("%s\n" % DocCLI.warp_fill(DocCLI._enhanced_tty_ify(desc),
                                                       limit, initial_indent=opt_indent,
                                                       subsequent_indent=opt_indent))
             if doc.get('options'):
-                text.append("OPTIONS (= is mandatory):\n")
+                text.append(DocCLI._style_header("OPTIONS") + "\n")
+                text.append(DocCLI._style_text("(= is mandatory, - is optional)", 'yellow', '(!) ') + "\n")
                 DocCLI.add_fields(text, doc.pop('options'), limit, opt_indent)
                 text.append('')
 
             if doc.get('attributes'):
-                text.append("ATTRIBUTES:\n")
+                text.append(DocCLI._style_header("ATTRIBUTES") + "\n")
                 text.append(DocCLI._indent_lines(DocCLI._dump_yaml(doc.pop('attributes')), opt_indent))
                 text.append('')
 
@@ -1205,7 +1366,7 @@ class DocCLI(CLI, RoleMixin):
                 if k not in doc:
                     continue
                 if isinstance(doc[k], string_types):
-                    text.append('%s: %s' % (k.upper(), DocCLI.warp_fill(DocCLI.tty_ify(doc[k]),
+                    text.append('%s: %s' % (k.upper(), DocCLI.warp_fill(DocCLI._enhanced_tty_ify(doc[k]),
                                             limit - (len(k) + 2), subsequent_indent=opt_indent)))
                 elif isinstance(doc[k], (list, tuple)):
                     text.append('%s: %s' % (k.upper(), ', '.join(doc[k])))
@@ -1231,14 +1392,16 @@ class DocCLI(CLI, RoleMixin):
         if collection_name:
             plugin_name = '%s.%s' % (collection_name, plugin_name)
 
-        text.append("> %s    (%s)\n" % (plugin_name.upper(), doc.pop('filename')))
+        # Style the plugin name with enhanced formatting
+        styled_name = DocCLI._style_plugin_name(plugin_name.upper())
+        text.append("%s    (%s)\n" % (styled_name, doc.pop('filename')))
 
         if isinstance(doc['description'], list):
             desc = " ".join(doc.pop('description'))
         else:
             desc = doc.pop('description')
 
-        text.append("%s\n" % DocCLI.warp_fill(DocCLI.tty_ify(desc), limit, initial_indent=opt_indent,
+        text.append("%s\n" % DocCLI.warp_fill(DocCLI._enhanced_tty_ify(desc), limit, initial_indent=opt_indent,
                                               subsequent_indent=opt_indent))
 
         if 'version_added' in doc:
@@ -1265,67 +1428,74 @@ class DocCLI(CLI, RoleMixin):
             text.append("  * note: %s\n" % "This module has a corresponding action plugin.")
 
         if doc.get('options', False):
-            text.append("OPTIONS (= is mandatory):\n")
+            text.append(DocCLI._style_header("OPTIONS") + "\n")
+            text.append(DocCLI._style_text("(= is mandatory, - is optional)", 'yellow', '(!) ') + "\n")
             DocCLI.add_fields(text, doc.pop('options'), limit, opt_indent)
             text.append('')
 
         if doc.get('attributes', False):
-            text.append("ATTRIBUTES:\n")
+            text.append(DocCLI._style_header("ATTRIBUTES") + "\n")
             text.append(DocCLI._indent_lines(DocCLI._dump_yaml(doc.pop('attributes')), opt_indent))
             text.append('')
 
         if doc.get('notes', False):
-            text.append("NOTES:")
+            text.append(DocCLI._style_header("NOTES") + "\n")
             for note in doc['notes']:
-                text.append(DocCLI.warp_fill(DocCLI.tty_ify(note), limit - 6,
+                text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(note), limit - 6,
                                              initial_indent=opt_indent[:-2] + "* ", subsequent_indent=opt_indent))
-            text.append('')
             text.append('')
             del doc['notes']
 
         if doc.get('seealso', False):
-            text.append("SEE ALSO:")
+            text.append(DocCLI._style_header("SEE ALSO") + "\n")
             for item in doc['seealso']:
                 if 'module' in item:
-                    text.append(DocCLI.warp_fill(DocCLI.tty_ify('Module %s' % item['module']),
+                    module_text = 'Module ' + DocCLI._style_text(item['module'], 'green', '')
+                    text.append(DocCLI.warp_fill(module_text,
                                 limit - 6, initial_indent=opt_indent[:-2] + "* ", subsequent_indent=opt_indent))
                     description = item.get('description')
                     if description is None and item['module'].startswith('ansible.builtin.'):
                         description = 'The official documentation on the %s module.' % item['module']
                     if description is not None:
-                        text.append(DocCLI.warp_fill(DocCLI.tty_ify(description),
+                        text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(description),
                                     limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
                     if item['module'].startswith('ansible.builtin.'):
                         relative_url = 'collections/%s_module.html' % item['module'].replace('.', '/', 2)
-                        text.append(DocCLI.warp_fill(DocCLI.tty_ify(get_versioned_doclink(relative_url)),
+                        styled_url = DocCLI._style_url(get_versioned_doclink(relative_url))
+                        text.append(DocCLI.warp_fill(styled_url,
                                     limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent))
                 elif 'plugin' in item and 'plugin_type' in item:
                     plugin_suffix = ' plugin' if item['plugin_type'] not in ('module', 'role') else ''
-                    text.append(DocCLI.warp_fill(DocCLI.tty_ify('%s%s %s' % (item['plugin_type'].title(), plugin_suffix, item['plugin'])),
+                    plugin_text = '%s%s %s' % (item['plugin_type'].title(), plugin_suffix, DocCLI._style_text(item['plugin'], 'green', ''))
+                    text.append(DocCLI.warp_fill(plugin_text,
                                 limit - 6, initial_indent=opt_indent[:-2] + "* ", subsequent_indent=opt_indent))
                     description = item.get('description')
                     if description is None and item['plugin'].startswith('ansible.builtin.'):
                         description = 'The official documentation on the %s %s%s.' % (item['plugin'], item['plugin_type'], plugin_suffix)
                     if description is not None:
-                        text.append(DocCLI.warp_fill(DocCLI.tty_ify(description),
+                        text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(description),
                                     limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
                     if item['plugin'].startswith('ansible.builtin.'):
                         relative_url = 'collections/%s_%s.html' % (item['plugin'].replace('.', '/', 2), item['plugin_type'])
-                        text.append(DocCLI.warp_fill(DocCLI.tty_ify(get_versioned_doclink(relative_url)),
+                        styled_url = DocCLI._style_url(get_versioned_doclink(relative_url))
+                        text.append(DocCLI.warp_fill(styled_url,
                                     limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent))
                 elif 'name' in item and 'link' in item and 'description' in item:
-                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(item['name']),
+                    text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(item['name']),
                                 limit - 6, initial_indent=opt_indent[:-2] + "* ", subsequent_indent=opt_indent))
-                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(item['description']),
+                    text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(item['description']),
                                 limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
-                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(item['link']),
+                    styled_link = DocCLI._style_url(item['link'])
+                    text.append(DocCLI.warp_fill(styled_link,
                                 limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
                 elif 'ref' in item and 'description' in item:
-                    text.append(DocCLI.warp_fill(DocCLI.tty_ify('Ansible documentation [%s]' % item['ref']),
+                    ref_text = 'Ansible documentation [' + DocCLI._style_text(item['ref'], 'cyan', '') + ']'
+                    text.append(DocCLI.warp_fill(ref_text,
                                 limit - 6, initial_indent=opt_indent[:-2] + "* ", subsequent_indent=opt_indent))
-                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(item['description']),
+                    text.append(DocCLI.warp_fill(DocCLI._enhanced_tty_ify(item['description']),
                                 limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
-                    text.append(DocCLI.warp_fill(DocCLI.tty_ify(get_versioned_doclink('/#stq=%s&stp=1' % item['ref'])),
+                    styled_url = DocCLI._style_url(get_versioned_doclink('/#stq=%s&stp=1' % item['ref']))
+                    text.append(DocCLI.warp_fill(styled_url,
                                 limit - 6, initial_indent=opt_indent + '   ', subsequent_indent=opt_indent + '   '))
 
             text.append('')
@@ -1334,7 +1504,8 @@ class DocCLI(CLI, RoleMixin):
 
         if doc.get('requirements', False):
             req = ", ".join(doc.pop('requirements'))
-            text.append("REQUIREMENTS:%s\n" % DocCLI.warp_fill(DocCLI.tty_ify(req), limit - 16, initial_indent="  ", subsequent_indent=opt_indent))
+            text.append(DocCLI._style_header("REQUIREMENTS") + "\n")
+            text.append("%s\n" % DocCLI.warp_fill(DocCLI._enhanced_tty_ify(req), limit, initial_indent=opt_indent, subsequent_indent=opt_indent))
 
         # Generic handler
         for k in sorted(doc):
@@ -1351,8 +1522,7 @@ class DocCLI(CLI, RoleMixin):
             text.append('')
 
         if doc.get('plainexamples', False):
-            text.append("EXAMPLES:")
-            text.append('')
+            text.append(DocCLI._style_header("EXAMPLES") + "\n")
             if isinstance(doc['plainexamples'], string_types):
                 text.append(doc.pop('plainexamples').strip())
             else:
@@ -1361,10 +1531,9 @@ class DocCLI(CLI, RoleMixin):
                 except Exception as e:
                     raise AnsibleParserError("Unable to parse examples section", orig_exc=e)
             text.append('')
-            text.append('')
 
         if doc.get('returndocs', False):
-            text.append("RETURN VALUES:")
+            text.append(DocCLI._style_header("RETURN VALUES") + "\n")
             DocCLI.add_fields(text, doc.pop('returndocs'), limit, opt_indent, return_values=True)
 
         return "\n".join(text)
