@@ -944,6 +944,13 @@ class TaskExecutor:
             # config system instead of directly accessing play_context.
             task_keys['password'] = self._play_context.password
 
+        # Handle CLI-sourced SSH options that aren't available through task.dump_attrs()
+        # These options are set via CLI flags but aren't FieldAttributes on Task/Base
+        for cli_opt in ("private_key_file", "ssh_common_args", "ssh_extra_args", "sftp_extra_args", "scp_extra_args"):
+            cli_val = getattr(self._play_context, cli_opt, None)
+            if cli_val and cli_opt not in task_keys:
+                task_keys[cli_opt] = cli_val
+
         # set options with 'templated vars' specific to this plugin and dependent ones
         self._connection.set_options(task_keys=task_keys, var_options=options)
         varnames.extend(self._set_plugin_options('shell', variables, templar, task_keys))
