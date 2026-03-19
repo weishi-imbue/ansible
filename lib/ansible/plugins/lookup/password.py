@@ -117,7 +117,7 @@ from ansible.utils.path import makedirs_safe
 
 
 DEFAULT_LENGTH = 20
-VALID_PARAMS = frozenset(('length', 'encrypt', 'chars'))
+VALID_PARAMS = frozenset(('length', 'encrypt', 'chars', 'ident'))
 
 
 def _parse_parameters(term):
@@ -220,13 +220,14 @@ def _gen_candidate_chars(characters):
 
 
 def _parse_content(content):
-    '''parse our password data format into password and salt
+    '''parse our password data format into password, salt, and ident
 
     :arg content: The data read from the file
-    :returns: password and salt
+    :returns: password, salt, and ident
     '''
     password = content
     salt = None
+    ident = None
 
     salt_slug = u' salt='
     try:
@@ -235,32 +236,52 @@ def _parse_content(content):
         # No salt
         pass
     else:
-        salt = password[sep + len(salt_slug):]
+        # Extract everything after ' salt='
+        metadata = content[sep + len(salt_slug):]
         password = content[:sep]
 
-    return password, salt
+        # Check if ident is present in metadata
+        ident_slug = u' ident='
+        if ident_slug in metadata:
+            ident_sep = metadata.rindex(ident_slug)
+            salt = metadata[:ident_sep]
+            ident = metadata[ident_sep + len(ident_slug):]
+        else:
+            salt = metadata
+
+    return password, salt, ident
 
 
-def _format_content(password, salt, encrypt=None):
-    """Format the password and salt for saving
+def _format_content(password, salt, encrypt=None, ident=None):
+    """Format the password, salt, and ident for saving
     :arg password: the plaintext password to save
     :arg salt: the salt to use when encrypting a password
     :arg encrypt: Which method the user requests that this password is encrypted.
         Note that the password is saved in clear.  Encrypt just tells us if we
         must save the salt value for idempotence.  Defaults to None.
+    :arg ident: the ident to use for BCrypt encryption. Defaults to None.
     :returns: a text string containing the formatted information
 
     .. warning:: Passwords are saved in clear.  This is because the playbooks
         expect to get cleartext passwords from this lookup.
     """
-    if not encrypt and not salt:
+    if not encrypt and not salt and not ident:
         return password
 
     # At this point, the calling code should have assured us that there is a salt value.
-    if not salt:
+    if encrypt and not salt:
         raise AnsibleAssertionError('_format_content was called with encryption requested but no salt value')
 
-    return u'%s salt=%s' % (password, salt)
+    if not salt and not ident:
+        return password
+
+    result = password
+    if salt:
+        result += u' salt=%s' % salt
+    if ident:
+        result += u' ident=%s' % ident
+
+    return result
 
 
 def _write_password_file(b_path, content):
@@ -326,9 +347,10 @@ class LookupModule(LookupBase):
             if content is None or b_path == to_bytes('/dev/null'):
                 plaintext_password = random_password(params['length'], chars)
                 salt = None
+                ident = None
                 changed = True
             else:
-                plaintext_password, salt = _parse_content(content)
+                plaintext_password, salt, ident = _parse_content(content)
 
             encrypt = params['encrypt']
             if encrypt and not salt:
@@ -338,8 +360,22 @@ class LookupModule(LookupBase):
                 except KeyError:
                     salt = random_salt()
 
+            # Handle ident parameter for BCrypt
+            param_ident = params.get('ident', None)
+            if encrypt == 'bcrypt' and param_ident and not ident:
+                # User specified ident but no ident was stored, update storage
+                ident = param_ident
+                changed = True
+            elif encrypt == 'bcrypt' and param_ident and ident and param_ident != ident:
+                # User changed ident, update storage
+                ident = param_ident
+                changed = True
+            elif encrypt == 'bcrypt' and param_ident:
+                # Use the user-specified ident
+                ident = param_ident
+
             if changed and b_path != to_bytes('/dev/null'):
-                content = _format_content(plaintext_password, salt, encrypt=encrypt)
+                content = _format_content(plaintext_password, salt, encrypt=encrypt, ident=ident)
                 _write_password_file(b_path, content)
 
             if first_process:
@@ -347,7 +383,7 @@ class LookupModule(LookupBase):
                 _release_lock(lockfile)
 
             if encrypt:
-                password = do_encrypt(plaintext_password, encrypt, salt=salt)
+                password = do_encrypt(plaintext_password, encrypt, salt=salt, ident=ident)
                 ret.append(password)
             else:
                 ret.append(plaintext_password)
