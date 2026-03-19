@@ -29,6 +29,7 @@ DOCUMENTATION = '''
       host_key_checking:
           description: Determines if ssh should check host keys
           type: boolean
+          default: True
           ini:
               - section: defaults
                 key: 'host_key_checking'
@@ -155,7 +156,7 @@ DOCUMENTATION = '''
       retries:
           # constant: ANSIBLE_SSH_RETRIES
           description: Number of attempts to connect.
-          default: 3
+          default: 0
           type: integer
           env:
             - name: ANSIBLE_SSH_RETRIES
@@ -170,7 +171,6 @@ DOCUMENTATION = '''
       port:
           description: Remote port to connect to.
           type: int
-          default: 22
           ini:
             - section: defaults
               key: remote_port
@@ -253,7 +253,7 @@ DOCUMENTATION = '''
       scp_if_ssh:
         default: smart
         description:
-          - "Preferred method to use when transfering files over ssh"
+          - "Preferred method to use when transferring files over ssh"
           - When set to smart, Ansible will try them until one succeeds or they all fail
           - If set to True, it will force 'scp', if False it will use 'sftp'
         env: [{name: ANSIBLE_SCP_IF_SSH}]
@@ -264,10 +264,9 @@ DOCUMENTATION = '''
             version_added: '2.7'
       transfer_method:
         description:
-          - "Method to use when transfering files over ssh"
+          - "Method to use when transferring files over ssh"
           - "This takes precedence over scp_if_ssh when set"
           - When set to smart, Ansible will try them until one succeeds or they all fail
-          - If set to True, it will force 'scp', if False it will use 'sftp'
         choices: ['sftp', 'scp', 'piped', 'smart']
         env: [{name: ANSIBLE_SSH_TRANSFER_METHOD}]
         ini:
