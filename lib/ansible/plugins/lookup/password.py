@@ -49,6 +49,12 @@ DOCUMENTATION = """
         description: The length of the generated password.
         default: 20
         type: integer
+      ident:
+        description:
+          - The algorithm identifier to use for bcrypt hashing.
+          - 'Valid values are: C(2), C(2a), C(2y), C(2b).'
+          - Only applicable when C(encrypt=bcrypt).
+        type: string
     notes:
       - A great alternative to the password lookup plugin,
         if you don't need to generate random passwords on a per-host basis,
@@ -356,6 +362,11 @@ class LookupModule(LookupBase):
             # Determine which ident to use: user param > file > None
             ident = params['ident'] if params['ident'] is not None else file_ident
 
+            # Validate ident if specified and encryption is bcrypt
+            if ident is not None and encrypt == 'bcrypt':
+                if ident not in ['2', '2a', '2y', '2b']:
+                    raise AnsibleError("invalid ident '%s' for bcrypt, must be one of: 2, 2a, 2y, 2b" % ident)
+
             if encrypt and not salt:
                 changed = True
                 try:
@@ -363,12 +374,14 @@ class LookupModule(LookupBase):
                 except KeyError:
                     salt = random_salt()
 
+            # If switching to bcrypt with incompatible salt, regenerate salt
+            if encrypt == 'bcrypt' and salt and len(salt) != 22:
+                changed = True
+                salt = random_salt(22)  # Generate bcrypt-compatible salt
+
             # If ident was provided by user but not in file, mark as changed
             if encrypt == 'bcrypt' and params['ident'] is not None and file_ident != params['ident']:
                 changed = True
-                # When switching to bcrypt, ensure the salt is compatible (22 chars for bcrypt)
-                if salt and len(salt) != 22:
-                    salt = random_salt(22)
 
             if changed and b_path != to_bytes('/dev/null'):
                 content = _format_content(plaintext_password, salt, encrypt=encrypt, ident=ident)

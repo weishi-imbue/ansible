@@ -212,8 +212,8 @@ class PasslibHash(BaseHash):
     def _clean_ident(self, ident):
         if self.algorithm == 'bcrypt':
             if ident is None:
-                # Default to '2a' for backward compatibility when no ident is specified for bcrypt
-                return '2a'
+                # Return None to let passlib use its own default ident
+                return None
             elif ident in ['2', '2a', '2y', '2b']:
                 return ident
             else:
@@ -232,7 +232,7 @@ class PasslibHash(BaseHash):
             settings['salt_size'] = salt_size
         if rounds:
             settings['rounds'] = rounds
-        if ident and self.algorithm == 'bcrypt':
+        if ident is not None and self.algorithm == 'bcrypt':
             settings['ident'] = ident
 
         # starting with passlib 1.7 'using' and 'hash' should be used instead of 'encrypt'
