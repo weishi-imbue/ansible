@@ -9,6 +9,8 @@ from yaml.representer import SafeRepresenter
 from ansible.module_utils._internal._datatag import AnsibleTaggedObject, Tripwire, AnsibleTagHelper
 from ansible.parsing.vault import VaultHelper
 from ansible.module_utils.common.yaml import HAS_LIBYAML
+from ansible.errors import AnsibleTemplateError, AnsibleUndefinedVariable
+from ansible._internal._templating._jinja_common import Marker, UndefinedMarker
 
 if HAS_LIBYAML:
     from yaml.cyaml import CSafeDumper as SafeDumper
@@ -46,6 +48,14 @@ class AnsibleDumper(_BaseDumper):
         cls.add_multi_representer(c.Sequence, SafeRepresenter.represent_list)
 
     def represent_ansible_tagged_object(self, data):
+        # Handle undefined variable markers - these should raise AnsibleUndefinedVariable
+        if isinstance(data, UndefinedMarker):
+            raise data._as_exception()
+
+        # Handle other Marker types that represent templating errors
+        if isinstance(data, Marker):
+            raise data._as_exception()
+
         if self._dump_vault_tags is not False and (ciphertext := VaultHelper.get_ciphertext(data, with_tags=False)):
             # deprecated: description='enable the deprecation warning below' core_version='2.23'
             # if self._dump_vault_tags is None:
@@ -55,6 +65,14 @@ class AnsibleDumper(_BaseDumper):
             #     )
 
             return self.represent_scalar('!vault', ciphertext, style='|')
+
+        # Handle the case where dump_vault_tags=False and we have undecryptable vault values
+        if self._dump_vault_tags is False and VaultHelper.get_ciphertext(data, with_tags=False):
+            try:
+                return self.represent_data(AnsibleTagHelper.as_native_type(data))  # automatically decrypts encrypted strings
+            except Exception as e:
+                # If decryption fails, raise AnsibleTemplateError with "undecryptable" in the message
+                raise AnsibleTemplateError(f"Cannot serialize undecryptable vault value to YAML when dump_vault_tags=False: {str(e)}")
 
         return self.represent_data(AnsibleTagHelper.as_native_type(data))  # automatically decrypts encrypted strings
 
