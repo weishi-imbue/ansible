@@ -34,6 +34,7 @@ from ansible.module_utils.common.text.converters import to_bytes, to_native, to_
 from ansible.module_utils.common.collections import is_sequence
 from ansible.module_utils.common.yaml import yaml_load, yaml_load_all
 from ansible.parsing.yaml.dumper import AnsibleDumper
+from ansible._internal._yaml._loader import AnsibleInstrumentedLoader, AnsibleLoader
 from ansible.template import accept_args_markers, accept_lazy_markers
 from ansible._internal._templating._jinja_common import MarkerError, UndefinedMarker, validate_arg_type
 from ansible.utils.display import Display
@@ -47,6 +48,7 @@ display = Display()
 UUID_NAMESPACE_ANSIBLE = uuid.UUID('361E6D51-FAEC-444A-9079-341386DA8E2E')
 
 
+@accept_lazy_markers
 def to_yaml(a, *_args, default_flow_style: bool | None = None, dump_vault_tags: bool | None = None, **kwargs) -> str:
     """Serialize input as terse flow-style YAML."""
     dumper = partial(AnsibleDumper, dump_vault_tags=dump_vault_tags)
@@ -54,6 +56,7 @@ def to_yaml(a, *_args, default_flow_style: bool | None = None, dump_vault_tags: 
     return yaml.dump(a, Dumper=dumper, allow_unicode=True, default_flow_style=default_flow_style, **kwargs)
 
 
+@accept_lazy_markers
 def to_nice_yaml(a, indent=4, *_args, default_flow_style=False, **kwargs) -> str:
     """Serialize input as verbose multi-line YAML."""
     return to_yaml(a, indent=indent, default_flow_style=default_flow_style, **kwargs)
@@ -251,10 +254,9 @@ def from_yaml(data):
         return None
 
     if isinstance(data, string_types):
-        # The ``text_type`` call here strips any custom
-        # string wrapper class, so that CSafeLoader can
-        # read the data
-        return yaml_load(text_type(to_text(data, errors='surrogate_or_strict')))
+        # Use AnsibleInstrumentedLoader to preserve trust/origin information
+        data_str = text_type(to_text(data, errors='surrogate_or_strict'))
+        return yaml.load(data_str, Loader=AnsibleInstrumentedLoader)
 
     display.deprecated(f"The from_yaml filter ignored non-string input of type {native_type_name(data)!r}.", version='2.23', obj=data)
     return data
@@ -265,10 +267,9 @@ def from_yaml_all(data):
         return []  # backward compatibility; ensure consistent result between classic/native Jinja for None/empty string input
 
     if isinstance(data, string_types):
-        # The ``text_type`` call here strips any custom
-        # string wrapper class, so that CSafeLoader can
-        # read the data
-        return yaml_load_all(text_type(to_text(data, errors='surrogate_or_strict')))
+        # Use AnsibleInstrumentedLoader to preserve trust/origin information
+        data_str = text_type(to_text(data, errors='surrogate_or_strict'))
+        return yaml.load_all(data_str, Loader=AnsibleInstrumentedLoader)
 
     display.deprecated(f"The from_yaml_all filter ignored non-string input of type {native_type_name(data)!r}.", version='2.23', obj=data)
     return data
