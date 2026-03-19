@@ -220,6 +220,17 @@ options:
         This is only valid if the rule also specifies one of the following
         protocols: tcp, udp, dccp or sctp."
     type: str
+  destination_ports:
+    description:
+      - "List of destination ports or port ranges for multiport matching.
+        Each item can be a service name, port number, or inclusive range
+        using the format first:last. This uses the multiport iptables module
+        and is only valid with the following protocols: tcp, udp, udplite, dccp or sctp.
+        Cannot be used together with destination_port."
+    type: list
+    elements: str
+    default: []
+    version_added: "2.17"
   to_ports:
     description:
       - This specifies a destination port or range of ports to use, without
@@ -382,6 +393,14 @@ EXAMPLES = r'''
     syn: match
     jump: ACCEPT
     comment: Accept new SSH connections.
+
+- name: Allow connections on multiple ports using multiport
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_ports: ['80', '443', '8080:8090']
+    jump: ACCEPT
+    comment: Accept HTTP, HTTPS and range 8080-8090
 
 - name: Match on IP ranges
   ansible.builtin.iptables:
@@ -553,6 +572,12 @@ def construct_rule(params):
     append_param(rule, params['set_counters'], '-c', False)
     append_param(rule, params['source_port'], '--source-port', False)
     append_param(rule, params['destination_port'], '--destination-port', False)
+    # Handle multiple destination ports using multiport module
+    if 'multiport' in params['match']:
+        append_csv(rule, params['destination_ports'], '--destination-ports')
+    elif params['destination_ports']:
+        append_match(rule, params['destination_ports'], 'multiport')
+        append_csv(rule, params['destination_ports'], '--destination-ports')
     append_param(rule, params['to_ports'], '--to-ports', False)
     append_param(rule, params['set_dscp_mark'], '--set-dscp', False)
     append_param(
@@ -694,6 +719,7 @@ def main():
             set_counters=dict(type='str'),
             source_port=dict(type='str'),
             destination_port=dict(type='str'),
+            destination_ports=dict(type='list', elements='str', default=[]),
             to_ports=dict(type='str'),
             set_dscp_mark=dict(type='str'),
             set_dscp_mark_class=dict(type='str'),
@@ -714,6 +740,7 @@ def main():
         mutually_exclusive=(
             ['set_dscp_mark', 'set_dscp_mark_class'],
             ['flush', 'policy'],
+            ['destination_port', 'destination_ports'],
         ),
         required_if=[
             ['jump', 'TEE', ['gateway']],
