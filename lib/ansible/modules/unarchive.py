@@ -332,6 +332,47 @@ class ZipArchive(object):
 #                    mode += 2 ** (9 + j)
         return (mode & ~umask)
 
+    def _valid_time_stamp(self, timestamp_str):
+        ''' Validate and sanitize ZIP file timestamps before processing them '''
+        # Default epoch time for invalid timestamps: 1980,1,1,0,0,0,0,0,0
+        default_time = (1980, 1, 1, 0, 0, 0, 0, 0, 0)
+
+        # Use regex to extract date components from YYYYMMDD.HHMMSS format
+        pattern = r'^(\d{4})(\d{2})(\d{2})\.(\d{2})(\d{2})(\d{2})$'
+        match = re.match(pattern, timestamp_str)
+
+        if not match:
+            return default_time
+
+        year, month, day, hour, minute, second = map(int, match.groups())
+
+        # Validate year limits between 1980 and 2107
+        if year < 1980 or year > 2107:
+            return default_time
+
+        # Validate month (1-12)
+        if month < 1 or month > 12:
+            return default_time
+
+        # Validate day (1-31)
+        if day < 1 or day > 31:
+            return default_time
+
+        # Validate hour (0-23)
+        if hour < 0 or hour > 23:
+            return default_time
+
+        # Validate minute (0-59)
+        if minute < 0 or minute > 59:
+            return default_time
+
+        # Validate second (0-59)
+        if second < 0 or second > 59:
+            return default_time
+
+        # Return valid timestamp tuple
+        return (year, month, day, hour, minute, second, 0, 0, 0)
+
     def _legacy_file_list(self):
         rc, out, err = self.module.run_command([self.cmd_path, '-v', self.src])
         if rc:
@@ -602,7 +643,8 @@ class ZipArchive(object):
             # Note: this timestamp calculation has a rounding error
             # somewhere... unzip and this timestamp can be one second off
             # When that happens, we report a change and re-unzip the file
-            dt_object = datetime.datetime(*(time.strptime(pcs[6], '%Y%m%d.%H%M%S')[0:6]))
+            time_tuple = self._valid_time_stamp(pcs[6])
+            dt_object = datetime.datetime(*time_tuple[0:6])
             timestamp = time.mktime(dt_object.timetuple())
 
             # Compare file timestamps
