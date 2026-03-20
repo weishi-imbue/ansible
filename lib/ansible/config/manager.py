@@ -730,6 +730,9 @@ class ConfigManager(object):
         else:
             raise AnsibleUndefinedConfigEntry(f'No config definition exists for {_get_config_label(plugin_type, plugin_name, config)}.')
 
+        # Report any accumulated configuration errors as warnings
+        self._report_config_warnings()
+
         return value, origin
 
     def initialize_plugin_configuration_definitions(self, plugin_type, name, defs):
