@@ -1191,3 +1191,302 @@ def test_get_json_from_tar_file(tmp_tarfile):
     data = collection._get_json_from_tar_file(tfile.name, 'MANIFEST.json')
 
     assert isinstance(data, dict)
+
+
+def test_manifest_control_dataclass():
+    """Test ManifestControl dataclass initialization."""
+    # Test default initialization
+    manifest_control = collection.ManifestControl()
+    assert manifest_control.directives == []
+    assert manifest_control.omit_default_directives is False
+
+    # Test with parameters
+    manifest_control = collection.ManifestControl(
+        directives=['include README.md', 'exclude *.pyc'],
+        omit_default_directives=True
+    )
+    assert manifest_control.directives == ['include README.md', 'exclude *.pyc']
+    assert manifest_control.omit_default_directives is True
+
+    # Test splatting from dict
+    manifest_dict = {
+        'directives': ['recursive-include plugins *'],
+        'omit_default_directives': False
+    }
+    manifest_control = collection.ManifestControl(**manifest_dict)
+    assert manifest_control.directives == ['recursive-include plugins *']
+    assert manifest_control.omit_default_directives is False
+
+
+def test_build_collection_with_manifest_and_build_ignore_error(collection_input, tmp_path_factory):
+    """Test that defining both manifest and build_ignore raises an error."""
+    input_dir = collection_input[0]
+
+    # Modify galaxy.yml to include both manifest and build_ignore
+    galaxy_yml_path = os.path.join(input_dir, 'galaxy.yml')
+    with open(galaxy_yml_path, 'r') as f:
+        galaxy_content = f.read()
+
+    # Add both manifest and build_ignore
+    galaxy_content += '\nmanifest:\n  directives:\n    - "include *.md"\nbuild_ignore:\n  - "*.pyc"\n'
+
+    with open(galaxy_yml_path, 'w') as f:
+        f.write(galaxy_content)
+
+    output_dir = to_text(tmp_path_factory.mktemp('test-output'))
+
+    expected = "Cannot define both 'manifest' and 'build_ignore' in galaxy.yml"
+    with pytest.raises(AnsibleError, match=expected):
+        collection.build_collection(to_text(input_dir), output_dir, False)
+
+
+def test_build_files_manifest_with_empty_manifest(collection_input):
+    """Test _build_files_manifest with empty manifest dictionary."""
+    input_dir = collection_input[0]
+
+    manifest_config = {'directives': [], 'omit_default_directives': False}
+
+    actual = collection._build_files_manifest(
+        to_bytes(input_dir),
+        'namespace',
+        'collection',
+        [],
+        manifest_config
+    )
+
+    assert actual['format'] == 1
+    assert 'files' in actual
+    # Should include root directory
+    assert any(f['name'] == '.' and f['ftype'] == 'dir' for f in actual['files'])
+
+
+def test_build_files_manifest_distlib_missing_import(collection_input, monkeypatch):
+    """Test that missing distlib dependency raises appropriate error."""
+    input_dir = collection_input[0]
+
+    # Mock ImportError for distlib
+    import builtins
+    real_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name == 'distlib.manifest' or name.startswith('distlib.'):
+            raise ImportError("No module named 'distlib'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', mock_import)
+
+    manifest_config = {'directives': ['include *.md']}
+
+    expected = "The distlib library is required for processing manifest directives"
+    with pytest.raises(AnsibleError, match=expected):
+        collection._build_files_manifest(
+            to_bytes(input_dir),
+            'namespace',
+            'collection',
+            [],
+            manifest_config
+        )
+
+
+def test_build_files_manifest_with_manifest_directives(collection_input):
+    """Test _build_files_manifest with custom manifest directives."""
+    input_dir = collection_input[0]
+
+    # Create some test files
+    test_file = os.path.join(input_dir, 'test.txt')
+    with open(test_file, 'w') as f:
+        f.write('test content')
+
+    manifest_config = {
+        'directives': ['include test.txt', 'exclude *.pyc'],
+        'omit_default_directives': True
+    }
+
+    actual = collection._build_files_manifest(
+        to_bytes(input_dir),
+        'namespace',
+        'collection',
+        [],
+        manifest_config
+    )
+
+    assert actual['format'] == 1
+    assert 'files' in actual
+
+    # Check that test.txt is included
+    file_names = [f['name'] for f in actual['files']]
+    assert 'test.txt' in file_names
+
+    # Verify file entry structure
+    test_file_entry = next(f for f in actual['files'] if f['name'] == 'test.txt')
+    assert test_file_entry['ftype'] == 'file'
+    assert test_file_entry['chksum_type'] == 'sha256'
+    assert test_file_entry['chksum_sha256'] is not None
+
+
+def test_build_files_manifest_omit_default_directives(collection_input):
+    """Test that omit_default_directives=True excludes default patterns."""
+    input_dir = collection_input[0]
+
+    # Create a .pyc file that would normally be excluded
+    pyc_file = os.path.join(input_dir, 'test.pyc')
+    with open(pyc_file, 'wb') as f:
+        f.write(b'compiled')
+
+    manifest_config = {
+        'directives': ['include *.pyc'],
+        'omit_default_directives': True
+    }
+
+    actual = collection._build_files_manifest(
+        to_bytes(input_dir),
+        'namespace',
+        'collection',
+        [],
+        manifest_config
+    )
+
+    file_names = [f['name'] for f in actual['files']]
+    # With omit_default_directives=True and explicit include, .pyc should be included
+    assert 'test.pyc' in file_names
+
+
+def test_build_files_manifest_with_default_directives(collection_input):
+    """Test that default directives are applied when omit_default_directives=False."""
+    input_dir = collection_input[0]
+
+    # Create a .pyc file that should be excluded by default
+    pyc_file = os.path.join(input_dir, 'test.pyc')
+    with open(pyc_file, 'wb') as f:
+        f.write(b'compiled')
+
+    manifest_config = {
+        'directives': [],
+        'omit_default_directives': False
+    }
+
+    actual = collection._build_files_manifest(
+        to_bytes(input_dir),
+        'namespace',
+        'collection',
+        [],
+        manifest_config
+    )
+
+    file_names = [f['name'] for f in actual['files']]
+    # .pyc files should be excluded by default directives
+    assert 'test.pyc' not in file_names
+
+
+def test_build_files_manifest_manifest_symlink_outside_collection(collection_input, monkeypatch):
+    """Test that symlinks pointing outside collection are excluded in manifest mode."""
+    input_dir, outside_dir = collection_input
+
+    mock_display = MagicMock()
+    monkeypatch.setattr(Display, 'warning', mock_display)
+
+    link_path = os.path.join(input_dir, 'external_link')
+    os.symlink(outside_dir, link_path)
+
+    manifest_config = {
+        'directives': ['recursive-include * *'],
+        'omit_default_directives': True
+    }
+
+    actual = collection._build_files_manifest(
+        to_bytes(input_dir),
+        'namespace',
+        'collection',
+        [],
+        manifest_config
+    )
+
+    file_names = [f['name'] for f in actual['files']]
+    assert 'external_link' not in file_names
+
+    # Should have warning about external symlink
+    assert mock_display.call_count >= 1
+    warning_messages = [call[0][0] for call in mock_display.call_args_list]
+    assert any('symbolic link' in msg and 'outside the collection' in msg for msg in warning_messages)
+
+
+def test_build_files_manifest_manifest_symlink_inside_collection(collection_input):
+    """Test that symlinks pointing inside collection are included in manifest mode."""
+    input_dir = collection_input[0]
+
+    # Create a file and a symlink to it
+    target_file = os.path.join(input_dir, 'target.txt')
+    with open(target_file, 'w') as f:
+        f.write('target content')
+
+    link_path = os.path.join(input_dir, 'link.txt')
+    os.symlink(target_file, link_path)
+
+    manifest_config = {
+        'directives': ['include *.txt'],
+        'omit_default_directives': True
+    }
+
+    actual = collection._build_files_manifest(
+        to_bytes(input_dir),
+        'namespace',
+        'collection',
+        [],
+        manifest_config
+    )
+
+    file_names = [f['name'] for f in actual['files']]
+    # Both target and link should be included
+    assert 'target.txt' in file_names
+    assert 'link.txt' in file_names
+
+
+def test_install_src_with_manifest_and_build_ignore_error(tmp_path_factory, monkeypatch):
+    """Test that install_src raises error when both manifest and build_ignore are defined."""
+    collection_path = to_bytes(tmp_path_factory.mktemp('test-collection'))
+    output_path = to_bytes(tmp_path_factory.mktemp('test-output'))
+
+    # Create minimal galaxy.yml with both manifest and build_ignore
+    galaxy_yml = os.path.join(collection_path, b'galaxy.yml')
+    galaxy_content = b"""
+namespace: test_namespace
+name: test_collection
+version: 1.0.0
+authors: [Test Author]
+readme: README.md
+manifest:
+  directives:
+    - "include *.md"
+build_ignore:
+  - "*.pyc"
+"""
+    with open(galaxy_yml, 'wb') as f:
+        f.write(galaxy_content)
+
+    # Create README.md
+    readme = os.path.join(collection_path, b'README.md')
+    with open(readme, 'wb') as f:
+        f.write(b'# Test Collection')
+
+    # Mock artifacts manager
+    artifacts_manager = MagicMock()
+    artifacts_manager.get_direct_collection_meta.return_value = {
+        'namespace': 'test_namespace',
+        'name': 'test_collection',
+        'version': '1.0.0',
+        'authors': ['Test Author'],
+        'readme': 'README.md',
+        'manifest': {'directives': ['include *.md']},
+        'build_ignore': ['*.pyc']
+    }
+
+    test_collection = collection.Candidate('test_namespace.test_collection', '1.0.0', None, 'dir', None)
+
+    expected = "Cannot define both 'manifest' and 'build_ignore' in galaxy.yml"
+    with pytest.raises(AnsibleError, match=expected):
+        collection.install_src(
+            test_collection,
+            collection_path,
+            output_path,
+            artifacts_manager
+        )
