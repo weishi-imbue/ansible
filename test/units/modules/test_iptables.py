@@ -1006,3 +1006,284 @@ class TestIptables(ModuleTestCase):
             '-m', 'set',
             '--match-set', 'banned_hosts', 'src,dst'
         ])
+
+    def test_chain_management_create_chain(self):
+        """Test creating a user-defined chain when it doesn't exist"""
+        set_module_args({
+            'chain': 'WHITELIST',
+            'chain_management': True,
+            'state': 'present',
+        })
+
+        commands_results = [
+            (1, '', ''),  # Chain doesn't exist (check fails)
+            (0, '', ''),  # Create chain succeeds
+        ]
+
+        with patch.object(basic.AnsibleModule, 'run_command') as run_command:
+            run_command.side_effect = commands_results
+            with self.assertRaises(AnsibleExitJson) as result:
+                iptables.main()
+                self.assertTrue(result.exception.args[0]['changed'])
+
+        self.assertEqual(run_command.call_count, 2)
+        # First call: check if chain exists
+        self.assertEqual(run_command.call_args_list[0][0][0], [
+            '/sbin/iptables',
+            '-t', 'filter',
+            '-L', 'WHITELIST',
+            '-n'
+        ])
+        # Second call: create the chain
+        self.assertEqual(run_command.call_args_list[1][0][0], [
+            '/sbin/iptables',
+            '-t', 'filter',
+            '-N', 'WHITELIST'
+        ])
+
+    def test_chain_management_create_chain_already_exists(self):
+        """Test creating a chain when it already exists (no change)"""
+        set_module_args({
+            'chain': 'WHITELIST',
+            'chain_management': True,
+            'state': 'present',
+        })
+
+        commands_results = [
+            (0, '', ''),  # Chain exists (check succeeds)
+        ]
+
+        with patch.object(basic.AnsibleModule, 'run_command') as run_command:
+            run_command.side_effect = commands_results
+            with self.assertRaises(AnsibleExitJson) as result:
+                iptables.main()
+                self.assertFalse(result.exception.args[0]['changed'])
+
+        self.assertEqual(run_command.call_count, 1)
+        # Only check if chain exists
+        self.assertEqual(run_command.call_args_list[0][0][0], [
+            '/sbin/iptables',
+            '-t', 'filter',
+            '-L', 'WHITELIST',
+            '-n'
+        ])
+
+    def test_chain_management_delete_chain(self):
+        """Test deleting a user-defined chain when it exists and is empty"""
+        set_module_args({
+            'chain': 'WHITELIST',
+            'chain_management': True,
+            'state': 'absent',
+        })
+
+        commands_results = [
+            (0, '', ''),  # Chain exists (check succeeds)
+            (0, 'Chain WHITELIST (0 references)\ntarget     prot opt source               destination\n', ''),  # Chain is empty
+            (0, '', ''),  # Delete chain succeeds
+        ]
+
+        with patch.object(basic.AnsibleModule, 'run_command') as run_command:
+            run_command.side_effect = commands_results
+            with self.assertRaises(AnsibleExitJson) as result:
+                iptables.main()
+                self.assertTrue(result.exception.args[0]['changed'])
+
+        self.assertEqual(run_command.call_count, 3)
+        # First call: check if chain exists
+        self.assertEqual(run_command.call_args_list[0][0][0], [
+            '/sbin/iptables',
+            '-t', 'filter',
+            '-L', 'WHITELIST',
+            '-n'
+        ])
+        # Second call: check if chain has rules
+        self.assertEqual(run_command.call_args_list[1][0][0], [
+            '/sbin/iptables',
+            '-t', 'filter',
+            '-L', 'WHITELIST',
+            '-n', '--line-numbers'
+        ])
+        # Third call: delete the chain
+        self.assertEqual(run_command.call_args_list[2][0][0], [
+            '/sbin/iptables',
+            '-t', 'filter',
+            '-X', 'WHITELIST'
+        ])
+
+    def test_chain_management_delete_chain_not_exists(self):
+        """Test deleting a chain when it doesn't exist (no change)"""
+        set_module_args({
+            'chain': 'WHITELIST',
+            'chain_management': True,
+            'state': 'absent',
+        })
+
+        commands_results = [
+            (1, '', ''),  # Chain doesn't exist (check fails)
+        ]
+
+        with patch.object(basic.AnsibleModule, 'run_command') as run_command:
+            run_command.side_effect = commands_results
+            with self.assertRaises(AnsibleExitJson) as result:
+                iptables.main()
+                self.assertFalse(result.exception.args[0]['changed'])
+
+        self.assertEqual(run_command.call_count, 1)
+        # Only check if chain exists
+        self.assertEqual(run_command.call_args_list[0][0][0], [
+            '/sbin/iptables',
+            '-t', 'filter',
+            '-L', 'WHITELIST',
+            '-n'
+        ])
+
+    def test_chain_management_delete_chain_with_rules_fails(self):
+        """Test that deleting a chain with rules fails"""
+        set_module_args({
+            'chain': 'WHITELIST',
+            'chain_management': True,
+            'state': 'absent',
+        })
+
+        commands_results = [
+            (0, '', ''),  # Chain exists (check succeeds)
+            (0, 'Chain WHITELIST (0 references)\ntarget     prot opt source               destination\n1    ACCEPT     all  --  192.168.1.0/24       0.0.0.0/0\n', ''),  # Chain has rules
+        ]
+
+        with patch.object(basic.AnsibleModule, 'run_command') as run_command:
+            run_command.side_effect = commands_results
+            with self.assertRaises(AnsibleFailJson) as result:
+                iptables.main()
+            self.assertTrue(result.exception.args[0]['failed'])
+            self.assertIn('contains rules', result.exception.args[0]['msg'])
+
+        self.assertEqual(run_command.call_count, 2)
+
+    def test_chain_management_create_chain_check_mode(self):
+        """Test creating a chain in check mode"""
+        set_module_args({
+            'chain': 'WHITELIST',
+            'chain_management': True,
+            'state': 'present',
+            '_ansible_check_mode': True,
+        })
+
+        commands_results = [
+            (1, '', ''),  # Chain doesn't exist (check fails)
+        ]
+
+        with patch.object(basic.AnsibleModule, 'run_command') as run_command:
+            run_command.side_effect = commands_results
+            with self.assertRaises(AnsibleExitJson) as result:
+                iptables.main()
+                self.assertTrue(result.exception.args[0]['changed'])
+
+        # Should only check, not create
+        self.assertEqual(run_command.call_count, 1)
+        self.assertEqual(run_command.call_args_list[0][0][0], [
+            '/sbin/iptables',
+            '-t', 'filter',
+            '-L', 'WHITELIST',
+            '-n'
+        ])
+
+    def test_chain_management_delete_chain_check_mode(self):
+        """Test deleting a chain in check mode"""
+        set_module_args({
+            'chain': 'WHITELIST',
+            'chain_management': True,
+            'state': 'absent',
+            '_ansible_check_mode': True,
+        })
+
+        commands_results = [
+            (0, '', ''),  # Chain exists (check succeeds)
+        ]
+
+        with patch.object(basic.AnsibleModule, 'run_command') as run_command:
+            run_command.side_effect = commands_results
+            with self.assertRaises(AnsibleExitJson) as result:
+                iptables.main()
+                self.assertTrue(result.exception.args[0]['changed'])
+
+        # Should only check, not delete
+        self.assertEqual(run_command.call_count, 1)
+        self.assertEqual(run_command.call_args_list[0][0][0], [
+            '/sbin/iptables',
+            '-t', 'filter',
+            '-L', 'WHITELIST',
+            '-n'
+        ])
+
+    def test_chain_management_with_custom_table(self):
+        """Test chain management with custom table"""
+        set_module_args({
+            'chain': 'CUSTOM_CHAIN',
+            'table': 'nat',
+            'chain_management': True,
+            'state': 'present',
+        })
+
+        commands_results = [
+            (1, '', ''),  # Chain doesn't exist
+            (0, '', ''),  # Create chain succeeds
+        ]
+
+        with patch.object(basic.AnsibleModule, 'run_command') as run_command:
+            run_command.side_effect = commands_results
+            with self.assertRaises(AnsibleExitJson) as result:
+                iptables.main()
+                self.assertTrue(result.exception.args[0]['changed'])
+
+        self.assertEqual(run_command.call_count, 2)
+        # Check uses nat table
+        self.assertEqual(run_command.call_args_list[0][0][0], [
+            '/sbin/iptables',
+            '-t', 'nat',
+            '-L', 'CUSTOM_CHAIN',
+            '-n'
+        ])
+        # Create uses nat table
+        self.assertEqual(run_command.call_args_list[1][0][0], [
+            '/sbin/iptables',
+            '-t', 'nat',
+            '-N', 'CUSTOM_CHAIN'
+        ])
+
+    def test_chain_management_requires_chain_parameter(self):
+        """Test that chain_management requires chain parameter"""
+        set_module_args({
+            'chain_management': True,
+            'state': 'present',
+        })
+
+        with self.assertRaises(AnsibleFailJson) as result:
+            iptables.main()
+        self.assertTrue(result.exception.args[0]['failed'])
+        self.assertIn('chain parameter is required', result.exception.args[0]['msg'])
+
+    def test_chain_management_mutually_exclusive_with_flush(self):
+        """Test that chain_management and flush are mutually exclusive"""
+        set_module_args({
+            'chain': 'INPUT',
+            'chain_management': True,
+            'flush': True,
+        })
+
+        with self.assertRaises(AnsibleFailJson) as result:
+            iptables.main()
+        self.assertTrue(result.exception.args[0]['failed'])
+        self.assertIn('mutually exclusive', result.exception.args[0]['msg'])
+
+    def test_chain_management_mutually_exclusive_with_policy(self):
+        """Test that chain_management and policy are mutually exclusive"""
+        set_module_args({
+            'chain': 'INPUT',
+            'chain_management': True,
+            'policy': 'ACCEPT',
+        })
+
+        with self.assertRaises(AnsibleFailJson) as result:
+            iptables.main()
+        self.assertTrue(result.exception.args[0]['failed'])
+        self.assertIn('mutually exclusive', result.exception.args[0]['msg'])
