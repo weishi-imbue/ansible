@@ -786,3 +786,46 @@ class VarsWithSources(MutableMapping):
 
     def copy(self):
         return VarsWithSources.new_vars_with_sources(self.data.copy(), self.sources.copy())
+
+    def __or__(self, other):
+        """
+        Implement the union operator (|) with another mapping.
+        Produces a new mapping representing the union, where keys from
+        `other` will override keys from the current data.
+        """
+        if not isinstance(other, MutableMapping):
+            return NotImplemented
+
+        # Create new dict with merged data, other takes precedence
+        result_data = self.data.copy()
+        result_data.update(other)
+
+        return result_data
+
+    def __ror__(self, other):
+        """
+        Implement the reflected union operator (|) when the left-hand operand
+        is another mapping. Produces a new merged mapping where keys from
+        the current data will override keys from `other` in case of conflicts.
+        """
+        if not isinstance(other, MutableMapping):
+            return NotImplemented
+
+        # Create new dict with merged data, self takes precedence
+        result_data = dict(other)
+        result_data.update(self.data)
+
+        return result_data
+
+    def __ior__(self, other):
+        """
+        Implement the in-place union operator (|=) with another mapping.
+        Updates the current data in place by adding/overwriting keys from `other`.
+        """
+        if not isinstance(other, MutableMapping):
+            return NotImplemented
+
+        # Update internal data in place
+        self.data.update(other)
+
+        return self
