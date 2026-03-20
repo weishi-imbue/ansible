@@ -29,13 +29,93 @@ from ansible.plugins.shell import ShellBase
 _common_args = ['PowerShell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Unrestricted']
 
 
-def _parse_clixml(data, stream="Error"):
+def _parse_clixml(data: bytes, stream: str = "Error") -> bytes:
     """
     Takes a byte string like '#< CLIXML\r\n<Objs...' and extracts the stream
     message encoded in the XML data. CLIXML is used by PowerShell to encode
     multiple objects in stderr.
+
+    Decodes PowerShell CLIXML escape sequences (_xDDDD_) including UTF-16
+    surrogate pairs and control characters.
     """
-    lines = []
+    def _decode_clixml_escapes(text):
+        """Decode PowerShell CLIXML escape sequences (_xDDDD_)"""
+        if not text:
+            return ""
+
+        result = []
+        i = 0
+        while i < len(text):
+            if (i <= len(text) - 7 and
+                text[i:i+2] == '_x' and
+                text[i+6:i+7] == '_'):
+                # Check if it's a valid hex escape sequence
+                hex_part = text[i+2:i+6]
+                if all(c in '0123456789abcdefABCDEF' for c in hex_part):
+                    try:
+                        code_unit = int(hex_part, 16)
+
+                        # Special handling for _x005F_ (underscore) - case insensitive
+                        if code_unit == 0x005F:
+                            # Look ahead to see if another escape sequence follows
+                            if (i + 7 < len(text) and
+                                i + 13 < len(text) and
+                                text[i+7:i+9].lower() == '_x' and
+                                text[i+13:i+14] == '_' and
+                                all(c in '0123456789abcdefABCDEF' for c in text[i+9:i+13])):
+                                # _x005F_ followed by another escape - decode to literal underscore
+                                result.append('_')
+                                i += 7
+                                continue
+                            else:
+                                # _x005F_ standalone - leave unchanged (preserve original case)
+                                result.append(text[i:i+7])
+                                i += 7
+                                continue
+
+                        # Check if this is the first part of a UTF-16 surrogate pair
+                        if 0xD800 <= code_unit <= 0xDBFF:
+                            # High surrogate, look for low surrogate
+                            if (i + 14 <= len(text) and
+                                text[i+7:i+9] == '_x' and
+                                text[i+13:i+14] == '_'):
+                                next_hex = text[i+9:i+13]
+                                if all(c in '0123456789abcdefABCDEF' for c in next_hex):
+                                    try:
+                                        low_surrogate = int(next_hex, 16)
+                                        if 0xDC00 <= low_surrogate <= 0xDFFF:
+                                            # Valid surrogate pair, decode to Unicode scalar
+                                            scalar = 0x10000 + ((code_unit - 0xD800) << 10) + (low_surrogate - 0xDC00)
+                                            result.append(chr(scalar))
+                                            i += 14  # Skip both escape sequences
+                                            continue
+                                    except (ValueError, OverflowError):
+                                        pass
+
+                            # High surrogate without valid low surrogate - preserve as-is
+                            # Use surrogatepass to encode unpaired surrogates
+                            result.append(chr(code_unit))
+                            i += 7
+                            continue
+
+                        # Regular Unicode code point
+                        result.append(chr(code_unit))
+                        i += 7
+                        continue
+
+                    except (ValueError, OverflowError):
+                        pass
+
+                # Invalid escape sequence - leave unchanged
+                result.append(text[i])
+                i += 1
+            else:
+                result.append(text[i])
+                i += 1
+
+        return ''.join(result)
+
+    obj_results = []
 
     # There are some scenarios where the stderr contains a nested CLIXML element like
     # '<# CLIXML\r\n<# CLIXML\r\n<Objs>...</Objs><Objs>...</Objs>'.
@@ -51,9 +131,26 @@ def _parse_clixml(data, stream="Error"):
         namespace = "{%s}" % namespace_match.group(1) if namespace_match else ""
 
         strings = clixml.findall("./%sS" % namespace)
-        lines.extend([e.text.replace('_x000D__x000A_', '') for e in strings if e.attrib.get('S') == stream])
+        # Collect all matching S elements from this Objs block
+        block_lines = []
+        for e in strings:
+            if e.attrib.get('S') == stream and e.text:
+                decoded_text = _decode_clixml_escapes(e.text)
+                block_lines.append(decoded_text)
 
-    return to_bytes('\r\n'.join(lines))
+        # Join lines within this block without separators
+        if block_lines:
+            obj_results.append(''.join(block_lines))
+
+    # Join results from different Objs blocks with \r\n separator
+    final_result = '\r\n'.join(obj_results)
+
+    # Remove trailing \r\n if present to match expected behavior
+    if final_result.endswith('\r\n'):
+        final_result = final_result[:-2]
+
+    # Encode to bytes using surrogatepass to preserve unpaired surrogate code units
+    return final_result.encode('utf-8', 'surrogatepass')
 
 
 class ShellModule(ShellBase):
