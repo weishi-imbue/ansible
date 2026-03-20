@@ -9,7 +9,7 @@ from yaml.representer import SafeRepresenter
 from ansible.module_utils._internal._datatag import AnsibleTaggedObject, Tripwire, AnsibleTagHelper
 from ansible.parsing.vault import VaultHelper
 from ansible.module_utils.common.yaml import HAS_LIBYAML
-from ansible.errors import AnsibleTemplateError
+from ansible.errors import AnsibleError, AnsibleTemplateError
 from ansible._internal._templating._jinja_common import VaultExceptionMarker
 
 if HAS_LIBYAML:
