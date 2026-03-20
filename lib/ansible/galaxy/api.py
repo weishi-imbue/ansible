@@ -284,6 +284,7 @@ class GalaxyAPI:
         """Save cached responses to disk."""
         cache_file = self._get_cache_file_path()
         cache_dir = self._get_cache_path()
+        temp_file = None
 
         try:
             # Create cache directory if it doesn't exist
@@ -310,10 +311,11 @@ class GalaxyAPI:
         except (IOError, OSError) as e:
             display.vvv("Failed to save cache to %s: %s" % (cache_file, to_native(e)))
             # Clean up temp file if it exists
-            try:
-                os.unlink(temp_file)
-            except (IOError, OSError):
-                pass
+            if temp_file is not None:
+                try:
+                    os.unlink(temp_file)
+                except (IOError, OSError):
+                    pass
 
     def _should_use_cache(self, url, args):
         """Determine if we should use cache for this request."""
@@ -353,8 +355,8 @@ class GalaxyAPI:
                     namespace = path_parts[collections_idx + 1]
                     name = path_parts[collections_idx + 2]
 
-                    # Get current collection metadata
-                    current_metadata = self.get_collection_metadata(namespace, name)
+                    # Get current collection metadata, bypassing cache to avoid circular dependency
+                    current_metadata = self.get_collection_metadata(namespace, name, use_cache=False)
 
                     # Compare with cached metadata if available
                     cached_modified = cache_entry.get('collection_modified')
@@ -400,13 +402,15 @@ class GalaxyAPI:
             self._save_cache(cache_data)
             display.vvv("Invalidated %d cache entries for collection %s.%s" % (len(keys_to_remove), namespace, name))
 
-    def _call_galaxy(self, url, args=None, headers=None, method=None, auth_required=False, error_context_msg=None):
+    def _call_galaxy(self, url, args=None, headers=None, method=None, auth_required=False, error_context_msg=None, use_cache=None):
         headers = headers or {}
         method = method or 'GET'
         self._add_auth_token(headers, url, required=auth_required)
 
         # Check if we should use cache for this request
-        use_cache = self._should_use_cache(url, args)
+        # use_cache parameter can override the default behavior
+        if use_cache is None:
+            use_cache = self._should_use_cache(url, args)
         cache_key = None
 
         if use_cache:
@@ -857,12 +861,13 @@ class GalaxyAPI:
         return versions
 
     @g_connect(['v2', 'v3'])
-    def get_collection_metadata(self, namespace, name):
+    def get_collection_metadata(self, namespace, name, use_cache=None):
         """
         Gets collection metadata including created and modified fields for cache invalidation.
 
         :param namespace: The collection namespace.
         :param name: The collection name.
+        :param use_cache: Whether to use cache for this request (None = auto, True = force use, False = bypass).
         :return: CollectionMetadata named tuple containing namespace, name, created, and modified timestamps.
         """
         if 'v3' in self.available_api_versions:
@@ -876,7 +881,7 @@ class GalaxyAPI:
 
         error_context_msg = 'Error when getting collection metadata for %s.%s from %s (%s)' \
                             % (namespace, name, self.name, self.api_server)
-        data = self._call_galaxy(n_url, error_context_msg=error_context_msg)
+        data = self._call_galaxy(n_url, error_context_msg=error_context_msg, use_cache=use_cache)
 
         # Handle field mappings for different API versions
         if 'v3' in self.available_api_versions:
