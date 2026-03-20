@@ -64,9 +64,9 @@ class AnsibleDumper(_BaseDumper):
             try:
                 decrypted = AnsibleTagHelper.as_native_type(data)
                 return self.represent_data(decrypted)
-            except Exception:
+            except Exception as e:
                 # Failed to decrypt - this is an undecryptable vault value
-                raise AnsibleTemplateError("Cannot serialize undecryptable vault value to YAML when dump_vault_tags=False")
+                raise AnsibleTemplateError("Cannot serialize undecryptable vault value to YAML when dump_vault_tags=False") from e
 
         return self.represent_data(AnsibleTagHelper.as_native_type(data))  # automatically decrypts encrypted strings
 
