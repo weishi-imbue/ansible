@@ -117,7 +117,8 @@ def results_thread_main(strategy):
             if isinstance(result, StrategySentinel):
                 break
             elif isinstance(result, DisplaySend):
-                display.display(*result.args, **result.kwargs)
+                method = getattr(display, result.method)
+                method(*result.args, **result.kwargs)
             elif isinstance(result, CallbackSend):
                 for arg in result.args:
                     if isinstance(arg, TaskResult):
