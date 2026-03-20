@@ -141,6 +141,10 @@ class GalaxyCLI(CLI):
                                  'https://galaxy.ansible.com/me/preferences.')
         common.add_argument('-c', '--ignore-certs', action='store_true', dest='ignore_certs',
                             default=C.GALAXY_IGNORE_CERTS, help='Ignore SSL certificate validation errors.')
+        common.add_argument('--clear-response-cache', dest='clear_response_cache', action='store_true', default=False,
+                            help='Clear the existing Galaxy server response cache before executing.')
+        common.add_argument('--no-cache', dest='no_cache', action='store_true', default=False,
+                            help='Do not use Galaxy server response cache.')
         opt_help.add_verbosity_options(common)
 
         force = opt_help.argparse.ArgumentParser(add_help=False)
@@ -495,6 +499,10 @@ class GalaxyCLI(CLI):
             self.api_servers.append(GalaxyAPI(self.galaxy, 'default', C.GALAXY_SERVER, token=cmd_token,
                                               validate_certs=validate_certs))
 
+        # Handle cache clearing if requested
+        if context.CLIARGS.get('clear_response_cache', False):
+            self._clear_response_cache()
+
         context.CLIARGS['func']()
 
     @property
@@ -517,6 +525,18 @@ class GalaxyCLI(CLI):
 
     def _get_default_collection_path(self):
         return C.COLLECTIONS_PATHS[0]
+
+    def _clear_response_cache(self):
+        """Clear the Galaxy server response cache directory."""
+        cache_dir = os.path.expanduser(C.GALAXY_CACHE_DIR)
+        if os.path.exists(cache_dir):
+            try:
+                shutil.rmtree(cache_dir)
+                display.display("Galaxy response cache cleared from %s" % cache_dir)
+            except OSError as e:
+                display.warning("Failed to clear Galaxy response cache from %s: %s" % (cache_dir, to_native(e)))
+        else:
+            display.vvv("Galaxy response cache directory %s does not exist" % cache_dir)
 
     def _parse_requirements_file(self, requirements_file, allow_old_format=True):
         """
