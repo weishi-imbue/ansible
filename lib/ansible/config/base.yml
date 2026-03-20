@@ -1504,6 +1504,18 @@ GALAXY_DISPLAY_PROGRESS:
   - {key: display_progress, section: galaxy}
   type: bool
   version_added: "2.10"
+GALAXY_CACHE_DIR:
+  name: Galaxy response cache directory
+  default: ~/.ansible/galaxy_cache
+  description:
+  - Directory where Galaxy API responses are cached to improve performance across repeated runs.
+  - The cache directory will be created with permissions 0o700 if it doesn't exist.
+  - Cache files are created with permissions 0o600 for security.
+  - World-writable cache files are ignored with a warning for security reasons.
+  env: [{name: ANSIBLE_GALAXY_CACHE_DIR}]
+  ini:
+  - {key: cache_dir, section: galaxy}
+  type: path
 HOST_KEY_CHECKING:
   name: Check host keys
   default: True

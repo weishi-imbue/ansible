@@ -8,9 +8,13 @@ __metaclass__ = type
 import hashlib
 import json
 import os
+import stat
 import tarfile
-import uuid
+import threading
 import time
+import uuid
+from collections import namedtuple
+from functools import wraps
 
 from ansible import constants as C
 from ansible.errors import AnsibleError
@@ -30,6 +34,54 @@ except ImportError:
     from urlparse import urlparse
 
 display = Display()
+
+# Cache lock for thread-safe cache access
+_CACHE_LOCK = threading.Lock()
+
+# Cache format version
+CACHE_VERSION = 1
+
+# Collection metadata named tuple
+CollectionMetadata = namedtuple('CollectionMetadata', ['namespace', 'name', 'created', 'modified'])
+
+
+def cache_lock(func):
+    """
+    Wrapper function that enforces serialized execution using a module-level lock
+    to ensure thread-safe access to shared cache files.
+
+    :param func: The function to wrap with locking
+    :return: The wrapped function
+    """
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        with _CACHE_LOCK:
+            return func(*args, **kwargs)
+    return wrapped
+
+
+def get_cache_id(server_url):
+    """
+    Generate a sanitized cache identifier from a Galaxy server URL.
+
+    :param server_url: The Galaxy server URL
+    :return: A cache identifier in the format 'hostname:port'
+    """
+    parsed = urlparse(server_url)
+    # Use hostname and port only, explicitly omitting credentials
+    hostname = parsed.hostname or 'unknown'
+    port = parsed.port
+
+    if port:
+        return '%s:%s' % (hostname, port)
+    else:
+        # Use default ports for common schemes
+        if parsed.scheme == 'https':
+            return '%s:443' % hostname
+        elif parsed.scheme == 'http':
+            return '%s:80' % hostname
+        else:
+            return hostname
 
 
 def g_connect(versions):
@@ -188,9 +240,185 @@ class GalaxyAPI:
         # Calling g_connect will populate self._available_api_versions
         return self._available_api_versions
 
+    def _get_cache_path(self):
+        """Get the cache directory path for this Galaxy server."""
+        cache_dir = os.path.expanduser(C.GALAXY_CACHE_DIR)
+        server_id = get_cache_id(self.api_server)
+        return os.path.join(cache_dir, server_id)
+
+    def _get_cache_file_path(self):
+        """Get the cache file path for this Galaxy server."""
+        return os.path.join(self._get_cache_path(), 'api.json')
+
+    @cache_lock
+    def _load_cache(self):
+        """Load cached responses from disk."""
+        cache_file = self._get_cache_file_path()
+
+        if not os.path.exists(cache_file):
+            return {}
+
+        try:
+            # Check file permissions - reject world-writable files
+            file_stat = os.stat(cache_file)
+            if file_stat.st_mode & stat.S_IWOTH:
+                display.warning("Ignoring world-writable cache file %s for security reasons" % cache_file)
+                return {}
+
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
+
+            # Validate cache version
+            cache_version = cache_data.get('version', 0)
+            if cache_version != CACHE_VERSION:
+                display.vvv("Cache version mismatch (expected %s, got %s), ignoring cache" % (CACHE_VERSION, cache_version))
+                return {}
+
+            return cache_data.get('data', {})
+        except (IOError, OSError, ValueError) as e:
+            display.vvv("Failed to load cache from %s: %s" % (cache_file, to_native(e)))
+            return {}
+
+    @cache_lock
+    def _save_cache(self, cache_data):
+        """Save cached responses to disk."""
+        cache_file = self._get_cache_file_path()
+        cache_dir = self._get_cache_path()
+
+        try:
+            # Create cache directory if it doesn't exist
+            if not os.path.exists(cache_dir):
+                os.makedirs(cache_dir, 0o700)
+
+            # Prepare cache file data with version marker
+            file_data = {
+                'version': CACHE_VERSION,
+                'data': cache_data
+            }
+
+            # Write to temporary file first, then rename for atomicity
+            temp_file = cache_file + '.tmp'
+            with open(temp_file, 'w') as f:
+                json.dump(file_data, f, separators=(',', ':'))
+
+            # Set proper permissions before moving
+            os.chmod(temp_file, 0o600)
+
+            # Atomic rename
+            os.rename(temp_file, cache_file)
+
+        except (IOError, OSError) as e:
+            display.vvv("Failed to save cache to %s: %s" % (cache_file, to_native(e)))
+            # Clean up temp file if it exists
+            try:
+                os.unlink(temp_file)
+            except (IOError, OSError):
+                pass
+
+    def _should_use_cache(self, url, args):
+        """Determine if we should use cache for this request."""
+        from ansible import context
+
+        # Don't cache if --no-cache flag is set
+        if context.CLIARGS.get('no_cache', False):
+            return False
+
+        # Don't cache requests with query parameters (they're likely dynamic)
+        parsed_url = urlparse(url)
+        if parsed_url.query or args:
+            return False
+
+        return True
+
+    def _get_cache_key(self, url, method='GET'):
+        """Generate cache key for a request."""
+        # Use URL path only (without query parameters) and method
+        parsed_url = urlparse(url)
+        cache_key = '%s_%s' % (method.upper(), parsed_url.path)
+        return cache_key.replace('/', '_').replace(':', '_')
+
+    def _is_cache_valid(self, cache_entry, url):
+        """Check if a cache entry is still valid."""
+        # For collection version listings, check if collection metadata has changed
+        parsed_url = urlparse(url)
+        path_parts = parsed_url.path.strip('/').split('/')
+
+        # Check if this is a collection versions request
+        if ('collections' in path_parts and 'versions' in path_parts and
+            len(path_parts) >= 4):
+            try:
+                # Extract namespace and name from URL path
+                collections_idx = path_parts.index('collections')
+                if collections_idx + 2 < len(path_parts):
+                    namespace = path_parts[collections_idx + 1]
+                    name = path_parts[collections_idx + 2]
+
+                    # Get current collection metadata
+                    current_metadata = self.get_collection_metadata(namespace, name)
+
+                    # Compare with cached metadata if available
+                    cached_modified = cache_entry.get('collection_modified')
+                    if cached_modified and current_metadata.modified:
+                        if current_metadata.modified != cached_modified:
+                            display.vvv("Collection %s.%s modified time changed, invalidating cache" % (namespace, name))
+                            return False
+
+            except (ValueError, IndexError, Exception) as e:
+                # If we can't determine collection info, assume cache is valid
+                display.vvv("Could not check collection metadata for cache validation: %s" % to_native(e))
+
+        return True
+
+    @cache_lock
+    def _invalidate_collection_cache(self, namespace, name):
+        """Invalidate cached responses for a specific collection."""
+        cache_data = self._load_cache()
+        keys_to_remove = []
+
+        for cache_key in cache_data:
+            cache_entry = cache_data[cache_key]
+            url = cache_entry.get('url', '')
+            parsed_url = urlparse(url)
+            path_parts = parsed_url.path.strip('/').split('/')
+
+            # Check if this cache entry is for the specified collection
+            if ('collections' in path_parts and len(path_parts) >= 4):
+                try:
+                    collections_idx = path_parts.index('collections')
+                    if (collections_idx + 2 < len(path_parts) and
+                        path_parts[collections_idx + 1] == namespace and
+                        path_parts[collections_idx + 2] == name):
+                        keys_to_remove.append(cache_key)
+                except (ValueError, IndexError):
+                    continue
+
+        # Remove invalidated entries
+        for key in keys_to_remove:
+            del cache_data[key]
+
+        if keys_to_remove:
+            self._save_cache(cache_data)
+            display.vvv("Invalidated %d cache entries for collection %s.%s" % (len(keys_to_remove), namespace, name))
+
     def _call_galaxy(self, url, args=None, headers=None, method=None, auth_required=False, error_context_msg=None):
         headers = headers or {}
+        method = method or 'GET'
         self._add_auth_token(headers, url, required=auth_required)
+
+        # Check if we should use cache for this request
+        use_cache = self._should_use_cache(url, args)
+        cache_key = None
+
+        if use_cache:
+            cache_key = self._get_cache_key(url, method)
+            cache_data = self._load_cache()
+
+            # Check if we have a cached response
+            if cache_key in cache_data:
+                cache_entry = cache_data[cache_key]
+                if self._is_cache_valid(cache_entry, url):
+                    display.vvv("Using cached response for %s" % url)
+                    return cache_entry['response']
 
         try:
             display.vvvv("Calling Galaxy at %s" % url)
@@ -207,6 +435,39 @@ class GalaxyAPI:
         except ValueError:
             raise AnsibleError("Failed to parse Galaxy response from '%s' as JSON:\n%s"
                                % (resp.url, to_native(resp_data)))
+
+        # Cache the response if appropriate
+        if use_cache and method.upper() == 'GET':
+            cache_data = self._load_cache()
+            cache_entry = {
+                'response': data,
+                'timestamp': time.time(),
+                'url': url
+            }
+
+            # For collection-related URLs, store collection metadata for cache invalidation
+            parsed_url = urlparse(url)
+            path_parts = parsed_url.path.strip('/').split('/')
+            if ('collections' in path_parts and len(path_parts) >= 4):
+                try:
+                    collections_idx = path_parts.index('collections')
+                    if collections_idx + 2 < len(path_parts):
+                        namespace = path_parts[collections_idx + 1]
+                        name = path_parts[collections_idx + 2]
+
+                        # Get collection metadata for cache invalidation
+                        try:
+                            metadata = self.get_collection_metadata(namespace, name)
+                            if metadata.modified:
+                                cache_entry['collection_modified'] = metadata.modified
+                        except Exception as e:
+                            # Don't fail caching if metadata retrieval fails
+                            display.vvv("Failed to get collection metadata for caching: %s" % to_native(e))
+                except (ValueError, IndexError):
+                    pass
+
+            cache_data[cache_key] = cache_entry
+            self._save_cache(cache_data)
 
         return data
 
@@ -594,3 +855,42 @@ class GalaxyAPI:
                                      error_context_msg=error_context_msg)
 
         return versions
+
+    @g_connect(['v2', 'v3'])
+    def get_collection_metadata(self, namespace, name):
+        """
+        Gets collection metadata including created and modified fields for cache invalidation.
+
+        :param namespace: The collection namespace.
+        :param name: The collection name.
+        :return: CollectionMetadata named tuple containing namespace, name, created, and modified timestamps.
+        """
+        if 'v3' in self.available_api_versions:
+            # For v3 API (Automation Hub)
+            api_path = self.available_api_versions['v3']
+            n_url = _urljoin(self.api_server, api_path, 'collections', namespace, name, '/')
+        else:
+            # For v2 API (Galaxy)
+            api_path = self.available_api_versions['v2']
+            n_url = _urljoin(self.api_server, api_path, 'collections', namespace, name, '/')
+
+        error_context_msg = 'Error when getting collection metadata for %s.%s from %s (%s)' \
+                            % (namespace, name, self.name, self.api_server)
+        data = self._call_galaxy(n_url, error_context_msg=error_context_msg)
+
+        # Handle field mappings for different API versions
+        if 'v3' in self.available_api_versions:
+            # v3 API response structure
+            created = data.get('created_at') or data.get('created')
+            modified = data.get('updated_at') or data.get('modified')
+        else:
+            # v2 API response structure
+            created = data.get('created') or data.get('created_at')
+            modified = data.get('modified') or data.get('updated_at')
+
+        return CollectionMetadata(
+            namespace=namespace,
+            name=name,
+            created=created,
+            modified=modified
+        )
