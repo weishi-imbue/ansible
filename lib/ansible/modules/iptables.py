@@ -610,6 +610,36 @@ def append_wait(rule, param, flag):
         rule.extend([flag, param])
 
 
+def has_rule_arguments(params):
+    """Check if any rule arguments were provided by the user"""
+    # Check for non-empty lists
+    list_params = ['match', 'destination_ports', 'ctstate']
+    for param in list_params:
+        if params.get(param):
+            return True
+
+    # Check for non-default syn parameter
+    if params.get('syn', 'ignore') != 'ignore':
+        return True
+
+    # Check for rule parameters that indicate a rule should be created
+    rule_params = [
+        'protocol', 'source', 'destination', 'jump', 'comment',
+        'in_interface', 'out_interface', 'fragment', 'set_counters',
+        'source_port', 'destination_port', 'to_ports', 'to_destination',
+        'to_source', 'set_dscp_mark', 'set_dscp_mark_class', 'reject_with',
+        'icmp_type', 'gateway', 'log_prefix', 'log_level', 'goto',
+        'src_range', 'dst_range', 'match_set', 'match_set_flags',
+        'limit', 'limit_burst', 'uid_owner', 'gid_owner', 'tcp_flags'
+    ]
+
+    for param in rule_params:
+        if params.get(param) is not None:
+            return True
+
+    return False
+
+
 def construct_rule(params):
     rule = []
     append_wait(rule, params['wait'], '-w')
@@ -894,6 +924,17 @@ def main():
         if (chain_is_present and args['chain_management'] and not module.check_mode):
             delete_chain(iptables_path, module, module.params)
 
+    # Handle empty chain creation when no rule arguments are provided
+    elif (args['state'] == 'present' and args['chain_management'] and
+          not has_rule_arguments(module.params)):
+        chain_is_present = check_chain_present(
+            iptables_path, module, module.params
+        )
+        args['changed'] = not chain_is_present
+
+        if not chain_is_present and not module.check_mode:
+            create_chain(iptables_path, module, module.params)
+
     else:
         insert = (module.params['action'] == 'insert')
         rule_is_present = check_rule_present(
@@ -903,6 +944,10 @@ def main():
             iptables_path, module, module.params
         )
         should_be_present = (args['state'] == 'present')
+
+        # Check if chain exists when chain_management is disabled
+        if not chain_is_present and not args['chain_management']:
+            module.fail_json(msg="Chain %s does not exist. Set chain_management=true to create it." % args['chain'])
 
         # Check if target is up to date
         args['changed'] = (rule_is_present != should_be_present)
