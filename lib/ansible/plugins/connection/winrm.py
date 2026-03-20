@@ -91,6 +91,15 @@ DOCUMENTATION = """
         vars:
           - name: ansible_winrm_kinit_mode
         type: str
+      kerberos_kinit_args:
+        description:
+            - Additional arguments to pass to the kinit command when acquiring a Kerberos ticket.
+            - These arguments replace all default arguments, including the C(-f) flag for delegation.
+            - If not provided and delegation is enabled, the default C(-f) flag will be used.
+            - Arguments should be provided as a single string and will be parsed for proper execution.
+        vars:
+          - name: ansible_winrm_kinit_args
+        type: str
       connection_timeout:
         description:
             - Sets the operation and read timeout settings for the WinRM
@@ -113,6 +122,7 @@ import traceback
 import json
 import tempfile
 import subprocess
+import shlex
 
 HAVE_KERBEROS = False
 try:
@@ -226,6 +236,7 @@ class Connection(ConnectionBase):
 
         self._winrm_path = self.get_option('path')
         self._kinit_cmd = self.get_option('kerberos_command')
+        self._kinit_args = self.get_option('kerberos_kinit_args')
         self._winrm_transport = self.get_option('transport')
         self._winrm_connection_timeout = self.get_option('connection_timeout')
 
@@ -291,14 +302,33 @@ class Connection(ConnectionBase):
         os.environ["KRB5CCNAME"] = krb5ccname
         krb5env = dict(KRB5CCNAME=krb5ccname)
 
-        # stores various flags to call with kinit, we currently only use this
-        # to set -f so we can get a forward-able ticket (cred delegation)
-        kinit_flags = []
-        if boolean(self.get_option('_extras').get('ansible_winrm_kerberos_delegation', False)):
-            kinit_flags.append('-f')
+        # Parse the kinit command to handle commands with embedded arguments
+        try:
+            kinit_cmd_parts = shlex.split(self._kinit_cmd)
+        except ValueError:
+            # If shlex.split fails, fall back to splitting on whitespace
+            kinit_cmd_parts = self._kinit_cmd.split()
 
-        kinit_cmdline = [self._kinit_cmd]
-        kinit_cmdline.extend(kinit_flags)
+        kinit_base_cmd = kinit_cmd_parts[0]
+        kinit_cmd_args = kinit_cmd_parts[1:]
+
+        # Build the argument list based on configuration
+        if self._kinit_args:
+            # Use user-specified kinit arguments, replacing all defaults
+            try:
+                kinit_args_list = shlex.split(self._kinit_args)
+            except ValueError:
+                # If shlex.split fails, fall back to splitting on whitespace
+                kinit_args_list = self._kinit_args.split()
+        else:
+            # Use existing command args plus delegation flag if needed
+            kinit_args_list = kinit_cmd_args[:]
+            if boolean(self.get_option('_extras').get('ansible_winrm_kerberos_delegation', False)):
+                kinit_args_list.append('-f')
+
+        # Build the complete command line: base_command + args + principal
+        kinit_cmdline = [kinit_base_cmd]
+        kinit_cmdline.extend(kinit_args_list)
         kinit_cmdline.append(principal)
 
         # pexpect runs the process in its own pty so it can correctly send
@@ -350,7 +380,7 @@ class Connection(ConnectionBase):
 
             except OSError as err:
                 err_msg = "Kerberos auth failure when calling kinit cmd " \
-                          "'%s': %s" % (self._kinit_cmd, to_native(err))
+                          "'%s': %s" % (kinit_base_cmd, to_native(err))
                 raise AnsibleConnectionFailure(err_msg)
 
             stdout, stderr = p.communicate(password + b'\n')
