@@ -757,8 +757,8 @@ DEFAULT_HASH_BEHAVIOUR:
   - {key: hash_behaviour, section: defaults}
 DEFAULT_HOST_LIST:
   name: Inventory Source
-  default: /etc/ansible/hosts
-  description: Comma-separated list of Ansible inventory sources
+  default: ['/etc/ansible/hosts']
+  description: List of Ansible inventory sources
   env:
     - name: ANSIBLE_INVENTORY
   expand_relative_paths: True
@@ -1054,7 +1054,7 @@ DEFAULT_ROLES_PATH:
   yaml: {key: defaults.roles_path}
 DEFAULT_SELINUX_SPECIAL_FS:
   name: Problematic file systems
-  default: fuse, nfs, vboxsf, ramfs, 9p, vfat
+  default: ['fuse', 'nfs', 'vboxsf', 'ramfs', '9p', 'vfat']
   description:
     - "Some filesystems do not support safe operations and/or return inconsistent errors,
        this setting makes Ansible 'tolerate' those in the list without causing fatal errors."
@@ -1333,7 +1333,7 @@ DISPLAY_SKIPPED_HOSTS:
   type: boolean
 DISPLAY_TRACEBACK:
   name: Control traceback display
-  default: never
+  default: ['never']
   description: When to include tracebacks in extended error messages
   env:
     - name: ANSIBLE_DISPLAY_TRACEBACK
@@ -1731,7 +1731,7 @@ INVENTORY_EXPORT:
   type: bool
 INVENTORY_IGNORE_EXTS:
   name: Inventory ignore extensions
-  default: "{{(REJECT_EXTS + ('.orig', '.cfg', '.retry'))}}"
+  default: "{{REJECT_EXTS + ['.orig', '.cfg', '.retry']}}"
   description: List of extensions to ignore when using a directory as an inventory source.
   env: [{name: ANSIBLE_INVENTORY_IGNORE}]
   ini:
@@ -1788,7 +1788,7 @@ INJECT_FACTS_AS_VARS:
   version_added: "2.5"
 MODULE_IGNORE_EXTS:
   name: Module ignore extensions
-  default: "{{(REJECT_EXTS + ('.yaml', '.yml', '.ini'))}}"
+  default: "{{REJECT_EXTS + ['.yaml', '.yml', '.ini']}}"
   description:
     - List of extensions to ignore when looking for modules to load.
     - This is for rejecting script and binary module fallback extensions.
