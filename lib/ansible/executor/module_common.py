@@ -592,6 +592,38 @@ def _slurp(path):
     return data
 
 
+def _extract_interpreter(b_module_data):
+    """
+    Extract interpreter and args from a module's shebang line.
+
+    Args:
+        b_module_data (bytes): The module source code as bytes
+
+    Returns:
+        tuple: (None, []) if no shebang present, otherwise (interpreter: str, args: List[str])
+    """
+    if not b_module_data:
+        return (None, [])
+
+    b_lines = b_module_data.split(b"\n", 1)
+    if not b_lines or not b_lines[0].startswith(b"#!"):
+        return (None, [])
+
+    b_shebang = b_lines[0].strip()
+    # shlex.split on python-2.6 needs bytes.  On python-3.x it needs text
+    args = shlex.split(to_native(b_shebang[2:], errors='surrogate_or_strict'))
+
+    if not args:
+        return (None, [])
+
+    # Convert args to text strings
+    args = [to_text(a, errors='surrogate_or_strict') for a in args]
+    interpreter = args[0]
+    interpreter_args = args[1:]
+
+    return (interpreter, interpreter_args)
+
+
 def _get_shebang(interpreter, task_vars, templar, args=tuple(), remote_is_local=False):
     """
     Note not stellar API:
@@ -644,15 +676,11 @@ def _get_shebang(interpreter, task_vars, templar, args=tuple(), remote_is_local=
     if not interpreter_out:
         # nothing matched(None) or in case someone configures empty string or empty intepreter
         interpreter_out = interpreter
-        shebang = None
-    elif interpreter_out == interpreter:
-        # no change, no new shebang
-        shebang = None
-    else:
-        # set shebang cause we changed interpreter
-        shebang = u'#!' + interpreter_out
-        if args:
-            shebang = shebang + u' ' + u' '.join(args)
+
+    # Always construct a proper shebang with the final interpreter
+    shebang = u'#!' + interpreter_out
+    if args:
+        shebang = shebang + u' ' + u' '.join(args)
 
     return shebang, interpreter_out
 
@@ -1241,9 +1269,11 @@ def _find_module_utils(module_name, b_module_data, module_path, module_args, tas
                                        'Look at traceback for that process for debugging information.')
         zipdata = to_text(zipdata, errors='surrogate_or_strict')
 
-        shebang, interpreter = _get_shebang(u'/usr/bin/python', task_vars, templar, remote_is_local=remote_is_local)
-        if shebang is None:
-            shebang = u'#!/usr/bin/python'
+        # Extract interpreter from module's shebang, or use default
+        extracted_interpreter, extracted_args = _extract_interpreter(b_module_data)
+        base_interpreter = extracted_interpreter if extracted_interpreter else u'/usr/bin/python'
+
+        shebang, interpreter = _get_shebang(base_interpreter, task_vars, templar, args=extracted_args, remote_is_local=remote_is_local)
 
         # FUTURE: the module cache entry should be invalidated if we got this value from a host-dependent source
         rlimit_nofile = C.config.get_config_value('PYTHON_MODULE_RLIMIT_NOFILE', variables=task_vars)
@@ -1371,27 +1401,36 @@ def modify_module(module_name, module_path, module_args, templar, task_vars=None
         return (b_module_data, module_style, to_text(shebang, nonstring='passthru'))
     elif shebang is None:
         b_lines = b_module_data.split(b"\n", 1)
-        if b_lines[0].startswith(b"#!"):
-            b_shebang = b_lines[0].strip()
-            # shlex.split on python-2.6 needs bytes.  On python-3.x it needs text
-            args = shlex.split(to_native(b_shebang[2:], errors='surrogate_or_strict'))
 
-            # _get_shebang() takes text strings
-            args = [to_text(a, errors='surrogate_or_strict') for a in args]
-            interpreter = args[0]
-            b_new_shebang = to_bytes(_get_shebang(interpreter, task_vars, templar, args[1:], remote_is_local=remote_is_local)[0],
-                                     errors='surrogate_or_strict', nonstring='passthru')
+        # Extract the original interpreter and args from the module
+        original_interpreter, original_args = _extract_interpreter(b_module_data)
 
-            if b_new_shebang:
-                b_lines[0] = b_shebang = b_new_shebang
+        if original_interpreter:
+            # Module has a shebang, get resolved shebang and interpreter
+            resolved_shebang, resolved_interpreter = _get_shebang(original_interpreter, task_vars, templar, args=original_args, remote_is_local=remote_is_local)
 
-            if os.path.basename(interpreter).startswith(u'python'):
-                b_lines.insert(1, b_ENCODING_STRING)
+            # Only replace shebang if the resolved interpreter differs from the extracted one
+            if resolved_interpreter != original_interpreter:
+                b_new_shebang = to_bytes(resolved_shebang, errors='surrogate_or_strict', nonstring='passthru')
+                b_lines[0] = b_new_shebang
 
-            shebang = to_text(b_shebang, nonstring='passthru', errors='surrogate_or_strict')
+                # Insert encoding string after shebang if it's a Python interpreter
+                if os.path.basename(resolved_interpreter).startswith(u'python'):
+                    b_lines.insert(1, b_ENCODING_STRING)
+            else:
+                # Keep original shebang, but ensure encoding string is present for Python interpreters
+                if os.path.basename(original_interpreter).startswith(u'python'):
+                    # Check if encoding string is already present on line 2
+                    if len(b_lines) < 2 or b_ENCODING_STRING not in b_lines[1]:
+                        b_lines.insert(1, b_ENCODING_STRING)
+
+            # Set shebang for return value (use resolved one whether changed or not)
+            shebang = resolved_shebang
         else:
-            # No shebang, assume a binary module?
-            pass
+            # No shebang - for consistency, get default shebang
+            resolved_shebang, resolved_interpreter = _get_shebang(u'/usr/bin/python', task_vars, templar, remote_is_local=remote_is_local)
+            # Don't add shebang to modules that don't have one - this preserves existing behavior
+            shebang = None
 
         b_module_data = b"\n".join(b_lines)
 
