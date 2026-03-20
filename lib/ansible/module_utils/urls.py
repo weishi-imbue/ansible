@@ -523,17 +523,38 @@ class MissingModuleError(Exception):
 
 
 class GzipDecodedReader(object):
-    """Handles decompression of gzip-encoded responses"""
+    """Handles decompression of gzip-encoded responses.
+
+    This class wraps an HTTP response object and transparently decompresses
+    gzip-encoded content when read. All other attributes are delegated to
+    the underlying response object.
+    """
 
     def __init__(self, fp):
-        self._fp = fp
+        """Initialize the GzipDecodedReader.
+
+        Args:
+            fp: The file-like response object to wrap
+        """
+        self._response = fp
         if HAS_GZIP:
-            # Create a new GzipFile instance for reading
+            # Create a new GzipFile instance for reading from the response
             self._gzip_obj = gzip.GzipFile(fileobj=fp)
         else:
             self._gzip_obj = None
 
     def read(self, size=-1):
+        """Read and decompress data from the gzip-encoded response.
+
+        Args:
+            size: Maximum number of bytes to read (default: all)
+
+        Returns:
+            Decompressed bytes
+
+        Raises:
+            ImportError: If gzip module is not available
+        """
         if not HAS_GZIP:
             raise ImportError(self.missing_gzip_error())
         return self._gzip_obj.read(size)
@@ -544,10 +565,12 @@ class GzipDecodedReader(object):
             try:
                 self._gzip_obj.close()
             except Exception:
+                # gzip close can fail if data is incomplete, but we still
+                # want to close the underlying response
                 pass
-        if self._fp is not None:
+        if self._response is not None:
             try:
-                self._fp.close()
+                self._response.close()
             except Exception:
                 pass
 
@@ -556,6 +579,14 @@ class GzipDecodedReader(object):
 
     def __exit__(self, *args):
         self.close()
+
+    def __getattr__(self, name):
+        """Delegate all other attribute access to the underlying response object.
+
+        This allows the GzipDecodedReader to act as a transparent wrapper,
+        providing access to all response attributes like headers, status, etc.
+        """
+        return getattr(self._response, name)
 
     @staticmethod
     def missing_gzip_error():
@@ -1553,30 +1584,15 @@ class Request:
         if decompress:
             content_encoding = response.headers.get('content-encoding', '').lower()
             if content_encoding == 'gzip':
-                if not HAS_GZIP:
-                    # If gzip module is unavailable and decompression is requested,
-                    # we should issue a deprecation warning according to requirements
-                    # But since Request.open doesn't have access to the module object,
-                    # we'll handle this at the fetch_url level
-                    pass
-                else:
+                if HAS_GZIP:
                     # Wrap the response in a GzipDecodedReader to provide transparent decompression
-                    original_fp = response
-                    try:
-                        response = GzipDecodedReader(response)
-                        # Copy important attributes from original response
-                        response.headers = original_fp.headers
-                        response.msg = original_fp.msg
-                        response.version = original_fp.version
-                        response.status = original_fp.status if hasattr(original_fp, 'status') else original_fp.code
-                        response.reason = original_fp.reason if hasattr(original_fp, 'reason') else ''
-                        response.url = original_fp.url if hasattr(original_fp, 'url') else url
-                        response.info = lambda: original_fp.headers
-                        response.getcode = lambda: getattr(original_fp, 'status', getattr(original_fp, 'code', None))
-                        response.geturl = lambda: getattr(original_fp, 'url', url)
-                    except Exception:
-                        # If decompression fails, return original response
-                        response = original_fp
+                    # The wrapper will delegate all attribute access to the original response
+                    # except for read(), which will decompress the data
+                    response = GzipDecodedReader(response)
+                # If gzip module is unavailable and decompression is requested,
+                # we should issue a deprecation warning according to requirements
+                # But since Request.open doesn't have access to the module object,
+                # we'll handle this at the fetch_url level (line ~1890)
 
         return response
 
