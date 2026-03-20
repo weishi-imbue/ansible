@@ -173,6 +173,14 @@ options:
     type: bool
     default: no
     version_added: '2.11'
+  decompress:
+    description:
+      - Whether to automatically decompress gzip-encoded responses.
+      - When C(True), responses with C(Content-Encoding: gzip) will be transparently decompressed.
+      - When C(False), gzip-encoded responses will be returned as compressed binary data.
+    type: bool
+    default: yes
+    version_added: '2.16'
 # informational: requirements for nodes
 extends_documentation_fragment:
     - files
@@ -372,7 +380,7 @@ def url_get(module, url, dest, use_proxy, last_mod_time, force, timeout=10, head
 
     start = datetime.datetime.utcnow()
     rsp, info = fetch_url(module, url, use_proxy=use_proxy, force=force, last_mod_time=last_mod_time, timeout=timeout, headers=headers, method=method,
-                          unredirected_headers=unredirected_headers)
+                          unredirected_headers=unredirected_headers, decompress=module.params['decompress'])
     elapsed = (datetime.datetime.utcnow() - start).seconds
 
     if info['status'] == 304:
@@ -457,6 +465,7 @@ def main():
         headers=dict(type='dict'),
         tmp_dest=dict(type='path'),
         unredirected_headers=dict(type='list', elements='str', default=[]),
+        decompress=dict(type='bool', default=True),
     )
 
     module = AnsibleModule(

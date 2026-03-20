@@ -199,6 +199,14 @@ options:
     type: bool
     default: no
     version_added: '2.11'
+  decompress:
+    description:
+      - Whether to automatically decompress gzip-encoded responses.
+      - When C(True), responses with C(Content-Encoding: gzip) will be transparently decompressed.
+      - When C(False), gzip-encoded responses will be returned as compressed binary data.
+    type: bool
+    default: yes
+    version_added: '2.16'
 extends_documentation_fragment:
   - action_common_attributes
   - files
@@ -593,7 +601,7 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout, c
     resp, info = fetch_url(module, url, data=data, headers=headers,
                            method=method, timeout=socket_timeout, unix_socket=module.params['unix_socket'],
                            ca_path=ca_path, unredirected_headers=unredirected_headers,
-                           use_proxy=module.params['use_proxy'],
+                           use_proxy=module.params['use_proxy'], decompress=module.params['decompress'],
                            **kwargs)
 
     if src:
@@ -627,6 +635,7 @@ def main():
         remote_src=dict(type='bool', default=False),
         ca_path=dict(type='path', default=None),
         unredirected_headers=dict(type='list', elements='str', default=[]),
+        decompress=dict(type='bool', default=True),
     )
 
     module = AnsibleModule(
