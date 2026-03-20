@@ -375,6 +375,15 @@ options:
         the program from running concurrently.
     type: str
     version_added: "2.10"
+  chain_management:
+    description:
+      - Enable creation and deletion of user-defined chains.
+      - When set to C(true) and C(state=present), creates the specified chain if it does not exist.
+      - When set to C(true) and C(state=absent), deletes the specified chain if it exists and contains no rules.
+      - This parameter requires the C(chain) parameter.
+    type: bool
+    default: false
+    version_added: "2.18"
 '''
 
 EXAMPLES = r'''
@@ -513,6 +522,18 @@ EXAMPLES = r'''
       - "443"
       - "8081:8083"
     jump: ACCEPT
+
+- name: Create a user-defined chain
+  ansible.builtin.iptables:
+    chain: WHITELIST
+    chain_management: true
+    state: present
+
+- name: Delete a user-defined chain
+  ansible.builtin.iptables:
+    chain: WHITELIST
+    chain_management: true
+    state: absent
 '''
 
 import re
@@ -668,7 +689,7 @@ def push_arguments(iptables_path, action, params, make_rule=True):
     return cmd
 
 
-def check_present(iptables_path, module, params):
+def check_rule_present(iptables_path, module, params):
     cmd = push_arguments(iptables_path, '-C', params)
     rc, _, __ = module.run_command(cmd, check_rc=False)
     return (rc == 0)
@@ -714,6 +735,38 @@ def get_iptables_version(iptables_path, module):
     cmd = [iptables_path, '--version']
     rc, out, _ = module.run_command(cmd, check_rc=True)
     return out.split('v')[1].rstrip('\n')
+
+
+def check_chain_present(iptables_path, module, params):
+    cmd = [iptables_path, '-t', params['table'], '-L', params['chain'], '-n']
+    rc, _, __ = module.run_command(cmd, check_rc=False)
+    return (rc == 0)
+
+
+def create_chain(iptables_path, module, params):
+    cmd = [iptables_path, '-t', params['table'], '-N', params['chain']]
+    module.run_command(cmd, check_rc=True)
+
+
+def delete_chain(iptables_path, module, params):
+    # Check if chain has rules before attempting to delete
+    cmd = [iptables_path, '-t', params['table'], '-L', params['chain'], '-n', '--line-numbers']
+    rc, out, _ = module.run_command(cmd, check_rc=False)
+
+    if rc != 0:
+        # Chain doesn't exist, nothing to delete
+        return
+
+    # Count rules in the chain (skip header lines)
+    lines = out.strip().split('\n')
+    rule_lines = [line for line in lines if line and not line.startswith('Chain') and not line.startswith('target')]
+
+    if rule_lines:
+        module.fail_json(msg="Cannot delete chain '%s': chain contains rules" % params['chain'])
+
+    # Chain exists and is empty, proceed with deletion
+    cmd = [iptables_path, '-t', params['table'], '-X', params['chain']]
+    module.run_command(cmd, check_rc=True)
 
 
 def main():
@@ -773,10 +826,13 @@ def main():
             syn=dict(type='str', default='ignore', choices=['ignore', 'match', 'negate']),
             flush=dict(type='bool', default=False),
             policy=dict(type='str', choices=['ACCEPT', 'DROP', 'QUEUE', 'RETURN']),
+            chain_management=dict(type='bool', default=False),
         ),
         mutually_exclusive=(
             ['set_dscp_mark', 'set_dscp_mark_class'],
             ['flush', 'policy'],
+            ['flush', 'chain_management'],
+            ['policy', 'chain_management'],
         ),
         required_if=[
             ['jump', 'TEE', ['gateway']],
@@ -800,6 +856,10 @@ def main():
     # Check if chain option is required
     if args['flush'] is False and args['chain'] is None:
         module.fail_json(msg="Either chain or flush parameter must be specified.")
+
+    # Check chain_management requirements
+    if module.params['chain_management'] and args['chain'] is None:
+        module.fail_json(msg="chain parameter is required when chain_management is true.")
 
     if module.params.get('log_prefix', None) or module.params.get('log_level', None):
         if module.params['jump'] is None:
@@ -833,9 +893,27 @@ def main():
         if changed and not module.check_mode:
             set_chain_policy(iptables_path, module, module.params)
 
+    # Chain management
+    elif module.params['chain_management']:
+        chain_is_present = check_chain_present(iptables_path, module, module.params)
+        should_be_present = (args['state'] == 'present')
+
+        # Check if target is up to date
+        args['changed'] = (chain_is_present != should_be_present)
+        if args['changed'] is False:
+            # Target is already up to date
+            module.exit_json(**args)
+
+        # Check only; don't modify
+        if not module.check_mode:
+            if should_be_present:
+                create_chain(iptables_path, module, module.params)
+            else:
+                delete_chain(iptables_path, module, module.params)
+
     else:
         insert = (module.params['action'] == 'insert')
-        rule_is_present = check_present(iptables_path, module, module.params)
+        rule_is_present = check_rule_present(iptables_path, module, module.params)
         should_be_present = (args['state'] == 'present')
 
         # Check if target is up to date
