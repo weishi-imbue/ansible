@@ -549,42 +549,22 @@ class Connection(ConnectionBase):
 
     def _winrm_get_raw_command_output(self, protocol: winrm.Protocol, shell_id: str, command_id: str) -> tuple[int, bytes, bytes]:
         """
-        Get raw WinRM command output using direct XML parsing with ElementTree.
+        Get WinRM command output from protocol.get_command_output.
         Returns a tuple of (return_code, binary_stdout, binary_stderr).
         """
-        # Make the raw SOAP request to get command output
-        response_xml = protocol.get_command_output(shell_id, command_id)
+        # Get command output from pywinrm protocol
+        response = protocol.get_command_output(shell_id, command_id)
 
-        # Parse the response to extract return code and streams
-        return_code = 0
-        stdout_data = b''
-        stderr_data = b''
-
-        # If response_xml is already a tuple (from pywinrm), extract the values
-        if isinstance(response_xml, tuple):
-            return_code, stdout_str, stderr_str = response_xml
+        # pywinrm returns a tuple of (return_code, stdout, stderr)
+        if isinstance(response, tuple):
+            return_code, stdout_str, stderr_str = response
             # Convert to bytes
             stdout_data = to_bytes(stdout_str) if stdout_str else b''
             stderr_data = to_bytes(stderr_str) if stderr_str else b''
+            return return_code, stdout_data, stderr_data
         else:
-            # Handle raw XML response if needed
-            # This would be for cases where we get raw XML from WinRM
-            try:
-                # Try to parse XML response directly
-                root = ET.fromstring(response_xml)
-                # Extract return code, stdout and stderr from XML
-                # This would need more detailed XML parsing based on WinRM response format
-                # For now, fallback to existing behavior
-                return_code = 0
-                stdout_data = to_bytes(response_xml) if response_xml else b''
-                stderr_data = b''
-            except (ET.ParseError, AttributeError):
-                # If XML parsing fails, treat as plain output
-                return_code = 0
-                stdout_data = to_bytes(response_xml) if response_xml else b''
-                stderr_data = b''
-
-        return return_code, stdout_data, stderr_data
+            # Unexpected response format - treat as stdout with zero return code
+            return 0, to_bytes(response) if response else b'', b''
 
     def _winrm_get_command_output(self, protocol: winrm.Protocol, shell_id: str, command_id: str, try_once: bool = False) -> tuple[int, bytes, bytes]:
         """
@@ -656,7 +636,7 @@ class Connection(ConnectionBase):
                     json.loads(filtered_output)
                 except ValueError:
                     # stdout does not contain a return response, stdin input was a fatal error
-                    # Improve CLIXML parsing by moving the logic after logging
+                    # Parse CLIXML stderr if present for better error messages
                     stderr_for_error = stderr_bytes
                     if stderr_bytes.startswith(b"#< CLIXML"):
                         stderr_for_error = _parse_clixml(stderr_bytes)
@@ -716,7 +696,7 @@ class Connection(ConnectionBase):
         stdout_bytes = to_bytes(stdout_bytes)
         stderr_bytes = to_bytes(stderr_bytes)
 
-        # parse just stderr from CLIXML output - move this logic after logging for better debugging
+        # Parse CLIXML formatted stderr to extract readable error messages
         if stderr_bytes.startswith(b"#< CLIXML"):
             try:
                 stderr_bytes = _parse_clixml(stderr_bytes)
