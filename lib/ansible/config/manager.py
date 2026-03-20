@@ -65,6 +65,140 @@ def _get_config_label(plugin_type: str, plugin_name: str, config: str) -> str:
     return entry
 
 
+def _ensure_type(value, value_type, origin=None, origin_ftype=None):
+    """Internal function to perform type conversion without tag handling."""
+    errmsg = ''
+    basedir = None
+    if origin and os.path.isabs(origin) and os.path.exists(to_bytes(origin)):
+        basedir = origin
+
+    if value_type:
+        value_type = value_type.lower()
+
+    if value is not None:
+        match value_type:
+            case 'boolean' | 'bool':
+                # Check if value is hashable before membership checking
+                try:
+                    hash(value)
+                    value = boolean(value, strict=False)
+                except TypeError:
+                    # Value is not hashable, convert to string first
+                    value = boolean(str(value), strict=False)
+
+            case 'integer' | 'int':
+                if not isinstance(value, int):
+                    # Handle boolean to integer conversion first
+                    if isinstance(value, bool):
+                        value = int(value)  # True -> 1, False -> 0
+                    else:
+                        try:
+                            # Use Decimal for float and string conversions
+                            decimal_value = decimal.Decimal(value)
+                            if decimal_value % 1 == 0:  # Check if mantissa is zero
+                                value = int(decimal_value)
+                            else:
+                                errmsg = 'int'
+                        except (decimal.DecimalException, decimal.InvalidOperation):
+                            errmsg = 'int'
+
+            case 'float':
+                if not isinstance(value, float):
+                    value = float(value)
+
+            case 'list':
+                if isinstance(value, string_types):
+                    value = [unquote(x.strip()) for x in value.split(',')]
+                elif isinstance(value, Sequence) and not isinstance(value, (string_types, bytes)):
+                    # Convert Sequence objects (except bytes) to list
+                    value = list(value)
+                elif not isinstance(value, Sequence):
+                    errmsg = 'list'
+
+            case 'none':
+                if value == "None":
+                    value = None
+                if value is not None:
+                    errmsg = 'None'
+
+            case 'path':
+                if isinstance(value, string_types):
+                    value = resolve_path(value, basedir=basedir)
+                else:
+                    errmsg = 'path'
+
+            case 'tmp' | 'temppath' | 'tmppath':
+                if isinstance(value, string_types):
+                    value = resolve_path(value, basedir=basedir)
+                    if not os.path.exists(value):
+                        makedirs_safe(value, 0o700)
+                    prefix = 'ansible-local-%s' % os.getpid()
+                    value = tempfile.mkdtemp(prefix=prefix, dir=value)
+                    atexit.register(cleanup_tmp_file, value, warn=True)
+                else:
+                    errmsg = 'temppath'
+
+            case 'pathspec':
+                if isinstance(value, string_types):
+                    value = value.split(os.pathsep)
+
+                if isinstance(value, Sequence) and not isinstance(value, (string_types, bytes)):
+                    # Verify all elements are strings before resolving paths
+                    if all(isinstance(x, string_types) for x in value):
+                        value = [resolve_path(x, basedir=basedir) for x in value]
+                    else:
+                        errmsg = 'pathspec'
+                else:
+                    errmsg = 'pathspec'
+
+            case 'pathlist':
+                if isinstance(value, string_types):
+                    value = [x.strip() for x in value.split(',')]
+
+                if isinstance(value, Sequence) and not isinstance(value, (string_types, bytes)):
+                    # Verify all elements are strings before resolving paths
+                    if all(isinstance(x, string_types) for x in value):
+                        value = [resolve_path(x, basedir=basedir) for x in value]
+                    else:
+                        errmsg = 'pathlist'
+                else:
+                    errmsg = 'pathlist'
+
+            case 'dict' | 'dictionary':
+                if isinstance(value, Mapping):
+                    # Convert Mapping objects to dict
+                    if not isinstance(value, dict):
+                        value = dict(value)
+                else:
+                    errmsg = 'dictionary'
+
+            case 'str' | 'string':
+                if isinstance(value, bytes):
+                    # Handle byte values with clear error reporting
+                    try:
+                        value = to_text(value, errors='surrogate_or_strict')
+                    except UnicodeDecodeError as e:
+                        raise ValueError(f'Cannot convert bytes to string: {e!r}')
+                elif isinstance(value, (string_types, bool, int, float, complex)):
+                    value = to_text(value, errors='surrogate_or_strict')
+                    if origin_ftype and origin_ftype == 'ini':
+                        value = unquote(value)
+                else:
+                    errmsg = 'string'
+
+            case _:
+                # Default to string type
+                if isinstance(value, (string_types)):
+                    value = to_text(value, errors='surrogate_or_strict')
+                    if origin_ftype and origin_ftype == 'ini':
+                        value = unquote(value)
+
+        if errmsg:
+            raise ValueError(f'Invalid type provided for {errmsg!r}: {value!r}')
+
+    return to_text(value, errors='surrogate_or_strict', nonstring='passthru')
+
+
 # FIXME: see if we can unify in module_utils with similar function used by argspec
 def ensure_type(value, value_type, origin=None, origin_ftype=None):
     """ return a configuration variable with casting
@@ -91,103 +225,21 @@ def ensure_type(value, value_type, origin=None, origin_ftype=None):
         :str: Sets the value to string types.
         :string: Same as 'str'
     """
+    from ansible.module_utils._internal._datatag import AnsibleTagHelper
 
-    errmsg = ''
-    basedir = None
-    if origin and os.path.isabs(origin) and os.path.exists(to_bytes(origin)):
-        basedir = origin
+    # Perform the actual type conversion
+    result = _ensure_type(value, value_type, origin=origin, origin_ftype=origin_ftype)
 
-    if value_type:
-        value_type = value_type.lower()
+    # Preserve and propagate tags, except for temppath, tmppath, tmp types
+    if value_type and value_type.lower() not in ('temppath', 'tmppath', 'tmp'):
+        try:
+            # Check if the original value has tags and copy them to the result
+            result = AnsibleTagHelper.tag_copy(value, result)
+        except Exception:
+            # If tag copying fails (e.g., value is not tagged), just return the result
+            pass
 
-    if value is not None:
-        if value_type in ('boolean', 'bool'):
-            value = boolean(value, strict=False)
-
-        elif value_type in ('integer', 'int'):
-            if not isinstance(value, int):
-                try:
-                    if (decimal_value := decimal.Decimal(value)) == (int_part := int(decimal_value)):
-                        value = int_part
-                    else:
-                        errmsg = 'int'
-                except decimal.DecimalException:
-                    errmsg = 'int'
-
-        elif value_type == 'float':
-            if not isinstance(value, float):
-                value = float(value)
-
-        elif value_type == 'list':
-            if isinstance(value, string_types):
-                value = [unquote(x.strip()) for x in value.split(',')]
-            elif not isinstance(value, Sequence):
-                errmsg = 'list'
-
-        elif value_type == 'none':
-            if value == "None":
-                value = None
-
-            if value is not None:
-                errmsg = 'None'
-
-        elif value_type == 'path':
-            if isinstance(value, string_types):
-                value = resolve_path(value, basedir=basedir)
-            else:
-                errmsg = 'path'
-
-        elif value_type in ('tmp', 'temppath', 'tmppath'):
-            if isinstance(value, string_types):
-                value = resolve_path(value, basedir=basedir)
-                if not os.path.exists(value):
-                    makedirs_safe(value, 0o700)
-                prefix = 'ansible-local-%s' % os.getpid()
-                value = tempfile.mkdtemp(prefix=prefix, dir=value)
-                atexit.register(cleanup_tmp_file, value, warn=True)
-            else:
-                errmsg = 'temppath'
-
-        elif value_type == 'pathspec':
-            if isinstance(value, string_types):
-                value = value.split(os.pathsep)
-
-            if isinstance(value, Sequence):
-                value = [resolve_path(x, basedir=basedir) for x in value]
-            else:
-                errmsg = 'pathspec'
-
-        elif value_type == 'pathlist':
-            if isinstance(value, string_types):
-                value = [x.strip() for x in value.split(',')]
-
-            if isinstance(value, Sequence):
-                value = [resolve_path(x, basedir=basedir) for x in value]
-            else:
-                errmsg = 'pathlist'
-
-        elif value_type in ('dict', 'dictionary'):
-            if not isinstance(value, Mapping):
-                errmsg = 'dictionary'
-
-        elif value_type in ('str', 'string'):
-            if isinstance(value, (string_types, bool, int, float, complex)):
-                value = to_text(value, errors='surrogate_or_strict')
-                if origin_ftype and origin_ftype == 'ini':
-                    value = unquote(value)
-            else:
-                errmsg = 'string'
-
-        # defaults to string type
-        elif isinstance(value, (string_types)):
-            value = to_text(value, errors='surrogate_or_strict')
-            if origin_ftype and origin_ftype == 'ini':
-                value = unquote(value)
-
-        if errmsg:
-            raise ValueError(f'Invalid type provided for {errmsg!r}: {value!r}')
-
-    return to_text(value, errors='surrogate_or_strict', nonstring='passthru')
+    return result
 
 
 # FIXME: see if this can live in utils/path
@@ -308,6 +360,7 @@ class ConfigManager(object):
 
     DEPRECATED = []  # type: list[tuple[str, dict[str, str]]]
     WARNINGS = set()  # type: set[str]
+    _errors = []  # type: list[str]
 
     def __init__(self, conf_file=None, defs_file=None):
 
@@ -376,8 +429,11 @@ class ConfigManager(object):
                 # FIXME: This really should be using an immutable sandboxed native environment, not just native environment
                 t = NativeEnvironment().from_string(value)
                 value = t.render(variables)
-            except Exception:
-                pass  # not templatable
+            except Exception as e:
+                # Capture exceptions during template rendering and add to _errors list
+                error_msg = f"Template rendering failed for value '{value}': {e}"
+                self._errors.append(error_msg)
+                # Continue with original value instead of failing silently
         return value
 
     def _read_config_yaml_file(self, yml_file):
@@ -682,6 +738,23 @@ class ConfigManager(object):
             self._plugins[plugin_type] = {}
 
         self._plugins[plugin_type][name] = defs
+
+    def _report_config_warnings(self):
+        """Report accumulated configuration errors as warnings."""
+        from ansible.utils.display import Display
+
+        display = Display()
+        for error in self._errors:
+            try:
+                # Create a synthetic exception for the error reporting
+                exception = ValueError(error)
+                display.error_as_warning(error, exception)
+            except Exception:
+                # Fallback to regular warning if error_as_warning fails
+                display.warning(f"Configuration error: {error}")
+
+        # Clear errors after reporting
+        self._errors.clear()
 
     @staticmethod
     def get_deprecated_msg_from_config(dep_docs, include_removal=False, collection_name=None):
