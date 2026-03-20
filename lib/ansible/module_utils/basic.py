@@ -703,6 +703,7 @@ class AnsibleModule(object):
         self._legal_inputs = []
         self._options_context = list()
         self._tmpdir = None
+        self._created_files = set()
 
         if add_file_common_args:
             for k, v in FILE_COMMON_ARGUMENTS.items():
@@ -823,6 +824,11 @@ class AnsibleModule(object):
             self.log('[DEPRECATION WARNING] %s %s' % (msg, date))
         else:
             self.log('[DEPRECATION WARNING] %s %s' % (msg, version))
+
+    def add_atomic_move_warnings(self):
+        """Add warnings for files created with default permissions by atomic_move()"""
+        for path in self._created_files:
+            self.warn("File '%s' created with default permissions '600'. The previous default was '666'. Specify 'mode' to avoid this warning." % path)
 
     def load_file_common_arguments(self, params, path=None):
         '''
@@ -1129,6 +1135,12 @@ class AnsibleModule(object):
         b_path = to_bytes(path, errors='surrogate_or_strict')
         if expand:
             b_path = os.path.expanduser(os.path.expandvars(b_path))
+
+        # Remove path from tracking since mode is being explicitly set
+        text_path = to_text(path)
+        if text_path in self._created_files:
+            self._created_files.remove(text_path)
+
         path_stat = os.lstat(b_path)
 
         if self.check_file_absent_if_check_mode(b_path):
@@ -2145,6 +2157,9 @@ class AnsibleModule(object):
         if 'invocation' not in kwargs:
             kwargs['invocation'] = {'module_args': self.params}
 
+        # Add warnings for files created with default permissions
+        self.add_atomic_move_warnings()
+
         if 'warnings' in kwargs:
             if isinstance(kwargs['warnings'], list):
                 for w in kwargs['warnings']:
@@ -2446,6 +2461,9 @@ class AnsibleModule(object):
                 # We're okay with trying our best here.  If the user is not
                 # root (or old Unices) they won't be able to chown.
                 pass
+
+            # Track files created with default permissions for potential warnings
+            self._created_files.add(to_text(dest))
 
         if self.selinux_enabled():
             # rename might not preserve context
