@@ -389,6 +389,12 @@ class Constructable(object):
             for keyed in keys:
                 if keyed and isinstance(keyed, dict):
 
+                    # Check for mutually exclusive options
+                    default_value = keyed.get('default_value')
+                    trailing_separator = keyed.get('trailing_separator', True)
+                    if default_value is not None and trailing_separator is False:
+                        raise AnsibleParserError("parameters are mutually exclusive for keyed groups: default_value|trailing_separator")
+
                     if fetch_hostvars:
                         variables = combine_vars(variables, self.inventory.get_host(host).get_vars())
                     try:
@@ -397,6 +403,14 @@ class Constructable(object):
                         if strict:
                             raise AnsibleParserError("Could not generate group for host %s from %s entry: %s" % (host, keyed.get('key'), to_native(e)))
                         continue
+
+                    # Handle the case where key evaluates to empty string
+                    if key == '':
+                        if default_value is not None:
+                            key = default_value
+                        else:
+                            # Skip generating a group for empty string without default_value
+                            continue
 
                     if key:
                         prefix = keyed.get('prefix', '')
@@ -415,10 +429,27 @@ class Constructable(object):
                             new_raw_group_names.append(key)
                         elif isinstance(key, list):
                             for name in key:
-                                new_raw_group_names.append(name)
+                                # Handle empty elements in list
+                                if name == '':
+                                    if default_value is not None:
+                                        new_raw_group_names.append(default_value)
+                                    else:
+                                        # Keep empty string to generate group with trailing separator
+                                        new_raw_group_names.append(name)
+                                else:
+                                    new_raw_group_names.append(name)
                         elif isinstance(key, Mapping):
                             for (gname, gval) in key.items():
-                                name = '%s%s%s' % (gname, sep, gval)
+                                # Handle empty values in dictionary
+                                if gval == '':
+                                    if default_value is not None:
+                                        name = '%s%s%s' % (gname, sep, default_value)
+                                    elif trailing_separator is False:
+                                        name = gname
+                                    else:
+                                        name = '%s%s' % (gname, sep)
+                                else:
+                                    name = '%s%s%s' % (gname, sep, gval)
                                 new_raw_group_names.append(name)
                         else:
                             raise AnsibleParserError("Invalid group name format, expected a string or a list of them or dictionary, got: %s" % type(key))
