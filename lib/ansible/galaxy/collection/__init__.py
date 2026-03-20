@@ -25,6 +25,7 @@ import typing as t
 
 from collections import namedtuple
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from hashlib import sha256
 from io import BytesIO
 from importlib.metadata import distribution
@@ -175,6 +176,17 @@ class CollectionVerifyResult:
     def __init__(self, collection_name):  # type: (str) -> None
         self.collection_name = collection_name  # type: str
         self.success = True  # type: bool
+
+
+@dataclass
+class ManifestControl:
+    """Control manifest file selection behavior for collection builds."""
+    directives: t.List[str] = field(default_factory=list)
+    omit_default_directives: bool = False
+
+    def __post_init__(self):
+        """Allow a dict representing this dataclass to be splatted directly."""
+        pass
 
 
 def verify_local_collection(local_collection, remote_collection, artifacts_manager):
@@ -446,12 +458,23 @@ def build_collection(u_collection_path, u_output_path, force):
     except LookupError as lookup_err:
         raise_from(AnsibleError(to_native(lookup_err)), lookup_err)
 
+    # Validate that manifest and build_ignore are not both defined
+    manifest_config = collection_meta.get('manifest')
+    build_ignore = collection_meta.get('build_ignore', [])
+
+    if manifest_config is not None and build_ignore:
+        raise AnsibleError(
+            "Cannot define both 'manifest' and 'build_ignore' in galaxy.yml. "
+            "Please use either manifest directives or build_ignore patterns, but not both."
+        )
+
     collection_manifest = _build_manifest(**collection_meta)
     file_manifest = _build_files_manifest(
         b_collection_path,
         collection_meta['namespace'],  # type: ignore[arg-type]
         collection_meta['name'],  # type: ignore[arg-type]
-        collection_meta['build_ignore'],  # type: ignore[arg-type]
+        build_ignore,  # type: ignore[arg-type]
+        manifest_config,
     )
 
     artifact_tarball_file_name = '{ns!s}-{name!s}-{ver!s}.tar.gz'.format(
@@ -1007,8 +1030,13 @@ def _verify_file_hash(b_path, filename, expected_hash, error_queue):
         error_queue.append(ModifiedContent(filename=filename, expected=expected_hash, installed=actual_hash))
 
 
-def _build_files_manifest(b_collection_path, namespace, name, ignore_patterns):
-    # type: (bytes, str, str, list[str]) -> FilesManifestType
+def _build_files_manifest(b_collection_path, namespace, name, ignore_patterns, manifest=None):
+    # type: (bytes, str, str, list[str], t.Optional[t.Dict[str, t.Any]]) -> FilesManifestType
+
+    # Route to distlib-based processing when manifest is provided
+    if manifest is not None:
+        return _build_files_manifest_distlib(b_collection_path, namespace, name, ignore_patterns, manifest)
+
     # We always ignore .pyc and .retry files as well as some well known version control directories. The ignore
     # patterns can be extended by the build_ignore key in galaxy.yml
     b_ignore_patterns = [
@@ -1092,6 +1120,126 @@ def _build_files_manifest(b_collection_path, namespace, name, ignore_patterns):
     _walk(b_collection_path, b_collection_path)
 
     return manifest
+
+
+def _build_files_manifest_distlib(b_collection_path, namespace, name, ignore_patterns, manifest):
+    # type: (bytes, str, str, list[str], t.Dict[str, t.Any]) -> FilesManifestType
+    """Build files manifest using distlib for MANIFEST.in style directives."""
+
+    # Check for distlib dependency
+    try:
+        from distlib.manifest import Manifest as DistlibManifest
+    except ImportError:
+        raise AnsibleError(
+            "The distlib library is required for processing manifest directives but is not installed. "
+            "Please install distlib to use manifest-based collection builds."
+        )
+
+    # Create the base manifest structure
+    entry_template = {
+        'name': None,
+        'ftype': None,
+        'chksum_type': None,
+        'chksum_sha256': None,
+        'format': MANIFEST_FORMAT
+    }
+    manifest_result = {
+        'files': [
+            {
+                'name': '.',
+                'ftype': 'dir',
+                'chksum_type': None,
+                'chksum_sha256': None,
+                'format': MANIFEST_FORMAT,
+            },
+        ],
+        'format': MANIFEST_FORMAT,
+    }  # type: FilesManifestType
+
+    # Initialize distlib Manifest
+    collection_path = to_text(b_collection_path)
+    distlib_manifest = DistlibManifest(collection_path)
+
+    # Extract manifest control settings
+    manifest_control = ManifestControl(**manifest) if isinstance(manifest, dict) else manifest
+
+    # Add default directives if not omitting them
+    if not manifest_control.omit_default_directives:
+        # Default inclusion patterns similar to original behavior
+        default_directives = [
+            'recursive-include * *',  # Include all files by default
+            'global-exclude MANIFEST.json',
+            'global-exclude FILES.json',
+            'global-exclude galaxy.yml',
+            'global-exclude galaxy.yaml',
+            'global-exclude .git',
+            'global-exclude *.pyc',
+            'global-exclude *.retry',
+            'global-exclude tests/output',
+            'global-exclude {0}-{1}-*.tar.gz'.format(namespace, name),
+        ]
+        # Add user-provided build_ignore patterns as global-exclude
+        for pattern in ignore_patterns:
+            default_directives.append('global-exclude {0}'.format(pattern))
+
+        # Process default directives first
+        for directive in default_directives:
+            distlib_manifest.process_directive(directive)
+
+    # Process user-provided manifest directives
+    for directive in manifest_control.directives:
+        distlib_manifest.process_directive(directive)
+
+    # Get the final list of files to include
+    try:
+        files_to_include = distlib_manifest.find_files()
+    except Exception as e:
+        raise AnsibleError(
+            "Error processing manifest directives: {0}".format(to_native(e))
+        )
+
+    # Convert relative paths to absolute for processing
+    b_collection_path_real = os.path.realpath(b_collection_path)
+
+    # Process each file/directory in the manifest
+    for rel_path in files_to_include:
+        b_abs_path = os.path.join(b_collection_path, to_bytes(rel_path))
+        b_abs_path_real = os.path.realpath(b_abs_path)
+
+        # Skip files that don't exist (in case of broken symlinks)
+        if not os.path.exists(b_abs_path):
+            display.vvv("Skipping non-existent path '%s' for collection build" % to_text(b_abs_path))
+            continue
+
+        if os.path.isdir(b_abs_path):
+            # Handle directory symlinks
+            if os.path.islink(b_abs_path):
+                if not _is_child_path(b_abs_path_real, b_collection_path_real):
+                    display.warning("Skipping '%s' as it is a symbolic link to a directory outside the collection"
+                                    % to_text(b_abs_path))
+                    continue
+
+            manifest_entry = entry_template.copy()
+            manifest_entry['name'] = rel_path
+            manifest_entry['ftype'] = 'dir'
+            manifest_result['files'].append(manifest_entry)
+
+        else:  # Regular file or file symlink
+            # For file symlinks, check if they point outside the collection
+            if os.path.islink(b_abs_path):
+                if not _is_child_path(b_abs_path_real, b_collection_path_real):
+                    display.warning("Skipping '%s' as it is a symbolic link to a file outside the collection"
+                                    % to_text(b_abs_path))
+                    continue
+
+            manifest_entry = entry_template.copy()
+            manifest_entry['name'] = rel_path
+            manifest_entry['ftype'] = 'file'
+            manifest_entry['chksum_type'] = 'sha256'
+            manifest_entry['chksum_sha256'] = secure_hash(b_abs_path, hash_func=sha256)
+            manifest_result['files'].append(manifest_entry)
+
+    return manifest_result
 
 
 # FIXME: accept a dict produced from `galaxy.yml` instead of separate args
@@ -1419,14 +1567,28 @@ def install_src(collection, b_collection_path, b_collection_output_path, artifac
     """
     collection_meta = artifacts_manager.get_direct_collection_meta(collection)
 
+    # Get manifest and build_ignore before potential modification
+    manifest_config = collection_meta.get('manifest')
+    build_ignore = collection_meta.get('build_ignore')
+
+    # Validate that manifest and build_ignore are not both defined
+    if manifest_config is not None and build_ignore is not None and build_ignore:
+        raise AnsibleError(
+            "Cannot define both 'manifest' and 'build_ignore' in galaxy.yml. "
+            "Please use either manifest directives or build_ignore patterns, but not both."
+        )
+
     if 'build_ignore' not in collection_meta:  # installed collection, not src
         # FIXME: optimize this? use a different process? copy instead of build?
         collection_meta['build_ignore'] = []
+        build_ignore = []
+
     collection_manifest = _build_manifest(**collection_meta)
     file_manifest = _build_files_manifest(
         b_collection_path,
         collection_meta['namespace'], collection_meta['name'],
-        collection_meta['build_ignore'],
+        build_ignore,
+        manifest_config,
     )
 
     collection_output_path = _build_collection_dir(
