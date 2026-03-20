@@ -1307,7 +1307,7 @@ class Request:
     def __init__(self, headers=None, use_proxy=True, force=False, timeout=10, validate_certs=True,
                  url_username=None, url_password=None, http_agent=None, force_basic_auth=False,
                  follow_redirects='urllib2', client_cert=None, client_key=None, cookies=None, unix_socket=None,
-                 ca_path=None, unredirected_headers=None, decompress=True, ciphers=None):
+                 ca_path=None, unredirected_headers=None, decompress=True, ciphers=None, use_netrc=True):
         """This class works somewhat similarly to the ``Session`` class of from requests
         by defining a cookiejar that an be used across requests as well as cascaded defaults that
         can apply to repeated requests
@@ -1345,6 +1345,7 @@ class Request:
         self.unredirected_headers = unredirected_headers
         self.decompress = decompress
         self.ciphers = ciphers
+        self.use_netrc = use_netrc
         if isinstance(cookies, cookiejar.CookieJar):
             self.cookies = cookies
         else:
@@ -1361,7 +1362,7 @@ class Request:
              force_basic_auth=None, follow_redirects=None,
              client_cert=None, client_key=None, cookies=None, use_gssapi=False,
              unix_socket=None, ca_path=None, unredirected_headers=None, decompress=None,
-             ciphers=None):
+             ciphers=None, use_netrc=None):
         """
         Sends a request via HTTP(S) or FTP using urllib2 (Python2) or urllib (Python3)
 
@@ -1430,6 +1431,7 @@ class Request:
         unredirected_headers = self._fallback(unredirected_headers, self.unredirected_headers)
         decompress = self._fallback(decompress, self.decompress)
         ciphers = self._fallback(ciphers, self.ciphers)
+        use_netrc = self._fallback(use_netrc, self.use_netrc)
 
         handlers = []
 
@@ -1484,7 +1486,7 @@ class Request:
             elif username and force_basic_auth:
                 headers["Authorization"] = basic_auth_header(username, password)
 
-            else:
+            elif use_netrc:
                 try:
                     rc = netrc.netrc(os.environ.get('NETRC'))
                     login = rc.authenticators(parsed.hostname)
@@ -1652,20 +1654,21 @@ def open_url(url, data=None, headers=None, method=None, use_proxy=True,
              force_basic_auth=False, follow_redirects='urllib2',
              client_cert=None, client_key=None, cookies=None,
              use_gssapi=False, unix_socket=None, ca_path=None,
-             unredirected_headers=None, decompress=True, ciphers=None):
+             unredirected_headers=None, decompress=True, ciphers=None, use_netrc=True):
     '''
     Sends a request via HTTP(S) or FTP using urllib2 (Python2) or urllib (Python3)
 
     Does not require the module environment
     '''
     method = method or ('POST' if data else 'GET')
-    return Request().open(method, url, data=data, headers=headers, use_proxy=use_proxy,
+    return Request(use_netrc=use_netrc).open(method, url, data=data, headers=headers, use_proxy=use_proxy,
                           force=force, last_mod_time=last_mod_time, timeout=timeout, validate_certs=validate_certs,
                           url_username=url_username, url_password=url_password, http_agent=http_agent,
                           force_basic_auth=force_basic_auth, follow_redirects=follow_redirects,
                           client_cert=client_cert, client_key=client_key, cookies=cookies,
                           use_gssapi=use_gssapi, unix_socket=unix_socket, ca_path=ca_path,
-                          unredirected_headers=unredirected_headers, decompress=decompress, ciphers=ciphers)
+                          unredirected_headers=unredirected_headers, decompress=decompress, ciphers=ciphers,
+                          use_netrc=use_netrc)
 
 
 def prepare_multipart(fields):
@@ -1812,13 +1815,14 @@ def url_argument_spec():
         client_cert=dict(type='path'),
         client_key=dict(type='path'),
         use_gssapi=dict(type='bool', default=False),
+        use_netrc=dict(type='bool', default=True),
     )
 
 
 def fetch_url(module, url, data=None, headers=None, method=None,
               use_proxy=None, force=False, last_mod_time=None, timeout=10,
               use_gssapi=False, unix_socket=None, ca_path=None, cookies=None, unredirected_headers=None,
-              decompress=True, ciphers=None):
+              decompress=True, ciphers=None, use_netrc=None):
     """Sends a request via HTTP(S) or FTP (needs the module as parameter)
 
     :arg module: The AnsibleModule (used to get username, password etc. (s.b.).
@@ -1878,6 +1882,9 @@ def fetch_url(module, url, data=None, headers=None, method=None,
     if use_proxy is None:
         use_proxy = module.params.get('use_proxy', True)
 
+    if use_netrc is None:
+        use_netrc = module.params.get('use_netrc', True)
+
     username = module.params.get('url_username', '')
     password = module.params.get('url_password', '')
     http_agent = module.params.get('http_agent', 'ansible-httpget')
@@ -1902,7 +1909,7 @@ def fetch_url(module, url, data=None, headers=None, method=None,
                      follow_redirects=follow_redirects, client_cert=client_cert,
                      client_key=client_key, cookies=cookies, use_gssapi=use_gssapi,
                      unix_socket=unix_socket, ca_path=ca_path, unredirected_headers=unredirected_headers,
-                     decompress=decompress, ciphers=ciphers)
+                     decompress=decompress, ciphers=ciphers, use_netrc=use_netrc)
         # Lowercase keys, to conform to py2 behavior, so that py3 and py2 are predictable
         info.update(dict((k.lower(), v) for k, v in r.info().items()))
 
