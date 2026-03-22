@@ -30,6 +30,7 @@ this code instead.
 from __future__ import annotations
 
 import base64
+import email.encoders
 import email.mime.application
 import email.mime.multipart
 import email.mime.nonmultipart
@@ -1004,16 +1005,43 @@ def open_url(url, data=None, headers=None, method=None, use_proxy=True,
                           unredirected_headers=unredirected_headers, decompress=decompress, ciphers=ciphers, use_netrc=use_netrc)
 
 
-def prepare_multipart(fields):
+def set_multipart_encoding(encoding):
+    """Maps encoding type strings to encoder functions from email.encoders.
+
+    :arg encoding: string specifying the encoding type
+    :returns: function reference from email.encoders library
+    :raises: ValueError if encoding type is not supported
+
+    Supported encodings:
+        - "base64": Base64 encoding (default)
+        - "7or8bit": 7-bit or 8-bit encoding
+    """
+    encoding_map = {
+        'base64': email.encoders.encode_base64,
+        '7or8bit': email.encoders.encode_7or8bit,
+    }
+
+    if encoding not in encoding_map:
+        raise ValueError(
+            "Unsupported encoding type '{}'. Supported types: {}".format(
+                encoding, ', '.join(sorted(encoding_map.keys()))
+            )
+        )
+
+    return encoding_map[encoding]
+
+
+def prepare_multipart(fields, multipart_encoding='base64'):
     """Takes a mapping, and prepares a multipart/form-data body
 
     :arg fields: Mapping
+    :arg multipart_encoding: Encoding type for multipart files (default: 'base64')
     :returns: tuple of (content_type, body) where ``content_type`` is
         the ``multipart/form-data`` ``Content-Type`` header including
         ``boundary`` and ``body`` is the prepared bytestring body
 
-    Payload content from a file will be base64 encoded and will include
-    the appropriate ``Content-Transfer-Encoding`` and ``Content-Type``
+    Payload content from a file will be encoded according to multipart_encoding
+    and will include the appropriate ``Content-Transfer-Encoding`` and ``Content-Type``
     headers.
 
     Example:
@@ -1063,12 +1091,15 @@ def prepare_multipart(fields):
 
         if not content and filename:
             with open(to_bytes(filename, errors='surrogate_or_strict'), 'rb') as f:
-                part = email.mime.application.MIMEApplication(f.read())
-                del part['Content-Type']
-                part.add_header('Content-Type', '%s/%s' % (main_type, sub_type))
+                part = email.mime.nonmultipart.MIMENonMultipart(main_type, sub_type)
+                part.set_payload(f.read())
         else:
             part = email.mime.nonmultipart.MIMENonMultipart(main_type, sub_type)
             part.set_payload(to_bytes(content))
+
+        # Apply the specified encoding
+        encoder = set_multipart_encoding(multipart_encoding)
+        encoder(part)
 
         part.add_header('Content-Disposition', 'form-data')
         del part['MIME-Version']
