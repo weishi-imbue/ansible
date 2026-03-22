@@ -74,9 +74,10 @@ except ImportError:
 
 HAVE_SELINUX = False
 try:
-    import selinux
+    from ansible.module_utils.compat import selinux
     HAVE_SELINUX = True
 except ImportError:
+    selinux = None
     pass
 
 # Python2 & 3 way to get NoneType
@@ -709,6 +710,11 @@ class AnsibleModule(object):
         self._options_context = list()
         self._tmpdir = None
 
+        # SELinux caching variables
+        self._selinux_enabled_cache = None
+        self._selinux_mls_enabled_cache = None
+        self._selinux_initial_context_cache = None
+
         if add_file_common_args:
             for k, v in FILE_COMMON_ARGUMENTS.items():
                 if k not in self.argument_spec:
@@ -876,31 +882,44 @@ class AnsibleModule(object):
     # by selinux.lgetfilecon().
 
     def selinux_mls_enabled(self):
+        if self._selinux_mls_enabled_cache is not None:
+            return self._selinux_mls_enabled_cache
+
         if not HAVE_SELINUX:
-            return False
-        if selinux.is_selinux_mls_enabled() == 1:
-            return True
-        else:
+            self._selinux_mls_enabled_cache = False
             return False
 
+        mls_enabled = selinux.is_selinux_mls_enabled() == 1
+        self._selinux_mls_enabled_cache = mls_enabled
+        return mls_enabled
+
     def selinux_enabled(self):
+        if self._selinux_enabled_cache is not None:
+            return self._selinux_enabled_cache
+
         if not HAVE_SELINUX:
             seenabled = self.get_bin_path('selinuxenabled')
             if seenabled is not None:
                 (rc, out, err) = self.run_command(seenabled)
                 if rc == 0:
                     self.fail_json(msg="Aborting, target uses selinux but python bindings (libselinux-python) aren't installed!")
+            self._selinux_enabled_cache = False
             return False
-        if selinux.is_selinux_enabled() == 1:
-            return True
-        else:
-            return False
+
+        enabled = selinux.is_selinux_enabled() == 1
+        self._selinux_enabled_cache = enabled
+        return enabled
 
     # Determine whether we need a placeholder for selevel/mls
     def selinux_initial_context(self):
+        if self._selinux_initial_context_cache is not None:
+            return self._selinux_initial_context_cache
+
         context = [None, None, None]
         if self.selinux_mls_enabled():
             context.append(None)
+
+        self._selinux_initial_context_cache = context
         return context
 
     # If selinux fails to find a default, return an array of None

@@ -323,6 +323,7 @@ import time
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils._text import to_bytes, to_native
 from ansible.module_utils.urls import fetch_file
+from ansible.module_utils.common.respawn import has_respawned, respawn_module, probe_interpreters_for_module
 
 # APT related constants
 APT_ENV_VARS = dict(
@@ -357,6 +358,13 @@ try:
     import apt_pkg
 except ImportError:
     HAS_PYTHON_APT = False
+
+    # Try to respawn under a compatible interpreter if we haven't already
+    if not has_respawned():
+        interpreters = ['/usr/bin/python3', '/usr/bin/python2', '/usr/bin/python']
+        compatible_interpreter = probe_interpreters_for_module(interpreters, 'apt')
+        if compatible_interpreter:
+            respawn_module(compatible_interpreter)
 
 if sys.version_info[0] < 3:
     PYTHON_APT = 'python-apt'
@@ -1106,8 +1114,7 @@ def main():
             import apt.debfile
             import apt_pkg
         except ImportError:
-            module.fail_json(msg="Could not import python modules: apt, apt_pkg. "
-                                 "Please install %s package." % PYTHON_APT)
+            module.fail_json(msg="{0} must be installed and visible from {1}.".format(PYTHON_APT, sys.executable))
 
     global APTITUDE_CMD
     APTITUDE_CMD = module.get_bin_path("aptitude", False)
