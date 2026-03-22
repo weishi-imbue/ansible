@@ -213,6 +213,7 @@ from ansible.module_utils._text import to_native, to_text
 from ansible.module_utils.basic import AnsibleModule, missing_required_lib
 from ansible.module_utils.common.process import get_bin_path
 from ansible.module_utils.facts.packages import LibMgr, CLIMgr, get_all_pkg_managers
+from ansible.module_utils.common.respawn import has_respawned, respawn_module, probe_interpreters_for_module
 
 
 class RPM(LibMgr):
@@ -233,10 +234,17 @@ class RPM(LibMgr):
         ''' we expect the python bindings installed, but this gives warning if they are missing and we have rpm cli'''
         we_have_lib = super(RPM, self).is_available()
 
+        # Try respawn if library is not available
+        if not we_have_lib and not has_respawned():
+            interpreters = ['/usr/libexec/platform-python', '/usr/bin/python3', '/usr/bin/python2']
+            compatible_interpreter = probe_interpreters_for_module(interpreters, 'rpm')
+            if compatible_interpreter:
+                respawn_module(compatible_interpreter)
+
         try:
             get_bin_path('rpm')
             if not we_have_lib:
-                module.warn('Found "rpm" but %s' % (missing_required_lib('rpm')))
+                module.warn('Found "rpm" but %s' % (missing_required_lib(self.LIB)))
         except ValueError:
             pass
 
@@ -263,6 +271,13 @@ class APT(LibMgr):
         ''' we expect the python bindings installed, but if there is apt/apt-get give warning about missing bindings'''
         we_have_lib = super(APT, self).is_available()
         if not we_have_lib:
+            # Try respawn if library is not available
+            if not has_respawned():
+                interpreters = ['/usr/bin/python3', '/usr/bin/python2', '/usr/bin/python']
+                compatible_interpreter = probe_interpreters_for_module(interpreters, 'apt')
+                if compatible_interpreter:
+                    respawn_module(compatible_interpreter)
+
             for exe in ('apt', 'apt-get', 'aptitude'):
                 try:
                     get_bin_path(exe)
