@@ -51,12 +51,12 @@ options:
     type: raw
   body_format:
     description:
-      - The serialization format of the body. When set to C(json) or C(form-urlencoded), encodes the
+      - The serialization format of the body. When set to C(json), C(form-urlencoded), or C(form-multipart), encodes the
         body argument, if needed, and automatically sets the Content-Type header accordingly.
         As of C(2.3) it is possible to override the `Content-Type` header, when
         set to C(json) or C(form-urlencoded) via the I(headers) option.
     type: str
-    choices: [ form-urlencoded, json, raw ]
+    choices: [ form-multipart, form-urlencoded, json, raw ]
     default: raw
     version_added: "2.0"
   method:
