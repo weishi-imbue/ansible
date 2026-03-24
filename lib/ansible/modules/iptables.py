@@ -314,6 +314,22 @@ options:
       - Specifies the GID or group to use in match by owner rule.
     type: str
     version_added: "2.9"
+  match_set:
+    description:
+      - Specifies a set name which can be defined by ipset.
+      - Must be used together with the C(match_set_flags) parameter.
+      - When specified, the module will use the iptables set extension
+        and add the C(-m set --match-set) clause to the rule.
+    type: str
+    version_added: "2.11"
+  match_set_flags:
+    description:
+      - Specifies the flags to use with C(match_set).
+      - Must be used together with the C(match_set) parameter.
+      - 'Possible values are: C(src), C(dst), C(src,dst), C(dst,src).'
+    type: str
+    choices: [ "src", "dst", "src,dst", "dst,src" ]
+    version_added: "2.11"
   reject_with:
     description:
       - 'Specifies the error packet type to return while rejecting. It implies
