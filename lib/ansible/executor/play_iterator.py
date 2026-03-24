@@ -42,7 +42,8 @@ class IteratingStates(IntEnum):
     TASKS = 1
     RESCUE = 2
     ALWAYS = 3
-    COMPLETE = 4
+    HANDLERS = 4
+    COMPLETE = 5
 
 
 class FailedStates(IntFlag):
@@ -51,6 +52,7 @@ class FailedStates(IntFlag):
     TASKS = 2
     RESCUE = 4
     ALWAYS = 8
+    HANDLERS = 16
 
 
 class HostState:
@@ -61,6 +63,7 @@ class HostState:
         self.cur_regular_task = 0
         self.cur_rescue_task = 0
         self.cur_always_task = 0
+        self.cur_handlers_task = 0
         self.run_state = IteratingStates.SETUP
         self.fail_state = FailedStates.NONE
         self.pending_setup = False
@@ -69,17 +72,22 @@ class HostState:
         self.always_child_state = None
         self.did_rescue = False
         self.did_start_at_task = False
+        self.handlers = []
+        self.pre_flushing_run_state = None
+        self.update_handlers = True
 
     def __repr__(self):
         return "HostState(%r)" % self._blocks
 
     def __str__(self):
-        return ("HOST STATE: block=%d, task=%d, rescue=%d, always=%d, run_state=%s, fail_state=%s, pending_setup=%s, tasks child state? (%s), "
-                "rescue child state? (%s), always child state? (%s), did rescue? %s, did start at task? %s" % (
+        return ("HOST STATE: block=%d, task=%d, rescue=%d, always=%d, handlers=%d, run_state=%s, fail_state=%s, pending_setup=%s, tasks child state? (%s), "
+                "rescue child state? (%s), always child state? (%s), did rescue? %s, did start at task? %s, "
+                "pre_flushing_run_state=%s, update_handlers=%s" % (
                     self.cur_block,
                     self.cur_regular_task,
                     self.cur_rescue_task,
                     self.cur_always_task,
+                    self.cur_handlers_task,
                     self.run_state,
                     self.fail_state,
                     self.pending_setup,
@@ -88,6 +96,8 @@ class HostState:
                     self.always_child_state,
                     self.did_rescue,
                     self.did_start_at_task,
+                    self.pre_flushing_run_state,
+                    self.update_handlers,
                 ))
 
     def __eq__(self, other):
@@ -95,8 +105,9 @@ class HostState:
             return False
 
         for attr in ('_blocks', 'cur_block', 'cur_regular_task', 'cur_rescue_task', 'cur_always_task',
-                     'run_state', 'fail_state', 'pending_setup',
-                     'tasks_child_state', 'rescue_child_state', 'always_child_state'):
+                     'cur_handlers_task', 'run_state', 'fail_state', 'pending_setup',
+                     'tasks_child_state', 'rescue_child_state', 'always_child_state',
+                     'handlers', 'pre_flushing_run_state', 'update_handlers'):
             if getattr(self, attr) != getattr(other, attr):
                 return False
 
@@ -111,11 +122,15 @@ class HostState:
         new_state.cur_regular_task = self.cur_regular_task
         new_state.cur_rescue_task = self.cur_rescue_task
         new_state.cur_always_task = self.cur_always_task
+        new_state.cur_handlers_task = self.cur_handlers_task
         new_state.run_state = self.run_state
         new_state.fail_state = self.fail_state
         new_state.pending_setup = self.pending_setup
         new_state.did_rescue = self.did_rescue
         new_state.did_start_at_task = self.did_start_at_task
+        new_state.handlers = self.handlers[:]
+        new_state.pre_flushing_run_state = self.pre_flushing_run_state
+        new_state.update_handlers = self.update_handlers
         if self.tasks_child_state is not None:
             new_state.tasks_child_state = self.tasks_child_state.copy()
         if self.rescue_child_state is not None:
@@ -199,6 +214,30 @@ class PlayIterator:
             play_context.start_at_task = None
 
         self.end_play = False
+
+        # flattened list of all handlers from the play
+        self.handlers = []
+        for handler_block in self._play.get_handlers():
+            self.handlers.extend(handler_block.get_tasks())
+
+        # flattened list of all tasks derived from Block.get_tasks()
+        self.all_tasks = []
+        for block in self._blocks:
+            self.all_tasks.extend(block.get_tasks())
+
+    @property
+    def host_states(self):
+        return self._host_states
+
+    def get_state_for_host(self, hostname):
+        if hostname not in self._host_states:
+            self.set_state_for_host(hostname, HostState(blocks=[]))
+        return self._host_states[hostname]
+
+    def clear_host_errors(self, host):
+        s = self.get_host_state(host)
+        s.fail_state = FailedStates.NONE
+        self.set_state_for_host(host.name, s)
 
     def get_host_state(self, host):
         # Since we're using the PlayIterator to carry forward failed hosts,
@@ -440,6 +479,9 @@ class PlayIterator:
             else:
                 state.fail_state |= FailedStates.ALWAYS
                 state.run_state = IteratingStates.COMPLETE
+        elif state.run_state == IteratingStates.HANDLERS:
+            state.fail_state |= FailedStates.HANDLERS
+            state.run_state = IteratingStates.COMPLETE
         return state
 
     def mark_host_failed(self, host):
