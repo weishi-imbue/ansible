@@ -371,7 +371,7 @@ from ansible.module_utils.six import PY2, iteritems, string_types
 from ansible.module_utils.six.moves.urllib.parse import urlencode, urlsplit
 from ansible.module_utils._text import to_native, to_text
 from ansible.module_utils.common._collections_compat import Mapping, Sequence
-from ansible.module_utils.urls import fetch_url, url_argument_spec
+from ansible.module_utils.urls import fetch_url, url_argument_spec, prepare_multipart
 
 JSON_CANDIDATES = ('text', 'json', 'javascript')
 
@@ -573,7 +573,7 @@ def main():
         url_username=dict(type='str', aliases=['user']),
         url_password=dict(type='str', aliases=['password'], no_log=True),
         body=dict(type='raw'),
-        body_format=dict(type='str', default='raw', choices=['form-urlencoded', 'json', 'raw']),
+        body_format=dict(type='str', default='raw', choices=['form-urlencoded', 'json', 'raw', 'form-multipart']),
         src=dict(type='path'),
         method=dict(type='str', default='GET'),
         return_content=dict(type='bool', default=False),
@@ -626,6 +626,15 @@ def main():
                 module.fail_json(msg='failed to parse body as form_urlencoded: %s' % to_native(e), elapsed=0)
         if 'content-type' not in [header.lower() for header in dict_headers]:
             dict_headers['Content-Type'] = 'application/x-www-form-urlencoded'
+    elif body_format == 'form-multipart':
+        if isinstance(body, string_types):
+            module.fail_json(msg='body must be a mapping when body_format is form-multipart, cannot be a string', elapsed=0)
+        try:
+            content_type, body = prepare_multipart(body)
+            if 'content-type' not in [header.lower() for header in dict_headers]:
+                dict_headers['Content-Type'] = content_type
+        except (TypeError, ValueError) as e:
+            module.fail_json(msg='failed to parse body as form-multipart: %s' % to_native(e), elapsed=0)
 
     if creates is not None:
         # do not run the command if the line contains creates=filename

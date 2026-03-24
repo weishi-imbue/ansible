@@ -43,8 +43,15 @@ import socket
 import sys
 import tempfile
 import traceback
+import uuid
+import mimetypes
 
 from contextlib import contextmanager
+
+try:
+    from collections.abc import Mapping
+except ImportError:
+    from collections import Mapping
 
 try:
     import httplib
@@ -1412,6 +1419,105 @@ def url_argument_spec():
         client_cert=dict(type='path'),
         client_key=dict(type='path'),
     )
+
+
+def prepare_multipart(fields):
+    """
+    Constructs a multipart/form-data payload from a structured dictionary.
+
+    :arg fields: A Mapping containing form fields, where each value can be:
+        - str or bytes: Simple form field
+        - Mapping: File field with 'filename', 'content', and optional 'mime_type'
+
+    :returns: Tuple of (content_type, body) where content_type is the Content-Type
+              header string and body is the multipart body as bytes
+
+    :raises TypeError: If fields is not a Mapping or contains invalid value types
+    :raises ValueError: If a file field is missing required 'filename' or 'content'
+    """
+    # Type validation for fields parameter
+    if not isinstance(fields, Mapping):
+        raise TypeError("fields must be a Mapping (dict-like object), got %s" % type(fields).__name__)
+
+    # Generate boundary for multipart encoding
+    boundary = '--------------------------%s' % uuid.uuid4().hex
+    b_boundary = to_bytes(boundary, errors='surrogate_or_strict')
+    part_boundary = b"--" + b_boundary
+
+    form_parts = []
+
+    for field_name, field_value in fields.items():
+        form_parts.append(part_boundary)
+
+        # Handle simple string/bytes fields
+        if isinstance(field_value, (bytes,) + (str,) if PY3 else (str, unicode)):
+            form_parts.append(
+                b'Content-Disposition: form-data; name="%s"' % to_bytes(field_name, errors='surrogate_or_strict')
+            )
+            form_parts.append(b"")
+            form_parts.append(to_bytes(field_value, errors='surrogate_or_strict'))
+
+        # Handle file fields (Mapping with filename/content)
+        elif isinstance(field_value, Mapping):
+            filename = field_value.get('filename')
+            content = field_value.get('content')
+            mime_type = field_value.get('mime_type')
+
+            # Validate that either filename or content is provided
+            if not filename and not content:
+                raise ValueError("File field '%s' must contain either 'filename' or 'content' key" % field_name)
+
+            # If only filename is provided, read file content
+            if filename and not content:
+                try:
+                    with open(filename, 'rb') as f:
+                        content = f.read()
+                except (IOError, OSError) as e:
+                    raise ValueError("Failed to read file '%s': %s" % (filename, to_native(e)))
+
+            # Determine MIME type
+            if not mime_type:
+                if filename:
+                    try:
+                        mime_type, _ = mimetypes.guess_type(filename)
+                    except Exception:
+                        mime_type = None
+                if not mime_type:
+                    mime_type = 'application/octet-stream'
+
+            # Use filename from field or generate one
+            display_filename = filename or 'file'
+            if isinstance(display_filename, bytes):
+                display_filename = to_text(display_filename, errors='surrogate_or_strict')
+
+            form_parts.append(
+                b'Content-Disposition: form-data; name="%s"; filename="%s"' % (
+                    to_bytes(field_name, errors='surrogate_or_strict'),
+                    to_bytes(display_filename, errors='surrogate_or_strict')
+                )
+            )
+            form_parts.append(
+                b'Content-Type: %s' % to_bytes(mime_type, errors='surrogate_or_strict')
+            )
+            form_parts.append(b"")
+            form_parts.append(to_bytes(content, errors='surrogate_or_strict'))
+
+        else:
+            # Invalid field value type
+            raise TypeError("Field '%s' value must be str, bytes, or Mapping, got %s" % (
+                field_name, type(field_value).__name__
+            ))
+
+    # Add final boundary
+    form_parts.append(b"%s--" % part_boundary)
+
+    # Join all parts with CRLF
+    body = b"\r\n".join(form_parts)
+
+    # Construct Content-Type header
+    content_type = 'multipart/form-data; boundary=%s' % boundary
+
+    return content_type, body
 
 
 def fetch_url(module, url, data=None, headers=None, method=None,
