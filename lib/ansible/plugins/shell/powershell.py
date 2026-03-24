@@ -102,18 +102,22 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
     result = []
     clixml_lines: list[bytes] = []
     in_clixml = False
+    objs_depth = 0
 
     for line in stderr.split(b"\r\n"):
         if not in_clixml:
             if line == CLIXML_HEADER:
                 in_clixml = True
+                objs_depth = 0
                 clixml_lines = [line]
             else:
                 result.append(line)
         else:
             clixml_lines.append(line)
-            if b"</Objs>" in line:
-                # End of CLIXML block found - try to decode
+            objs_depth += line.count(b"<Objs ") + line.count(b"<Objs>")
+            objs_depth -= line.count(b"</Objs>")
+            if objs_depth <= 0 and b"</Objs>" in line:
+                # All CLIXML blocks closed - try to decode
                 clixml_data = b"\r\n".join(clixml_lines)
 
                 # Find where the last </Objs> ends to capture trailing data
@@ -122,19 +126,21 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
                 clixml_data = clixml_data[:end_idx]
 
                 try:
-                    try:
-                        decoded_data = clixml_data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        decoded_data = clixml_data.decode("cp437").encode("utf-8").decode("utf-8")
-
-                    parsed = _parse_clixml(decoded_data.encode("utf-8"))
-                    result.append(parsed + trailing)
+                    parsed = _parse_clixml(clixml_data)
+                    # Strip trailing \r\n from parsed to avoid double
+                    # newlines when joined back with \r\n separators
+                    if parsed.endswith(b"\r\n"):
+                        parsed = parsed[:-2]
+                    combined = parsed + trailing
+                    if combined:
+                        result.append(combined)
                 except Exception:
                     # On any error, leave original data unchanged
                     result.extend(clixml_lines)
 
                 in_clixml = False
                 clixml_lines = []
+                objs_depth = 0
 
     # If we ended while still in a CLIXML block (incomplete), preserve original
     if in_clixml:
