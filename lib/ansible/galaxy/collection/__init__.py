@@ -409,6 +409,7 @@ def install_collections(
         force_deps,  # type: bool
         allow_pre_release,  # type: bool
         artifacts_manager,  # type: ConcreteArtifactsManager
+        upgrade=False,  # type: bool
 ):  # type: (...) -> None
     """Install Ansible collections to the path specified.
 
@@ -420,6 +421,7 @@ def install_collections(
     :param no_deps: Ignore any collection dependencies and only install the base requirements.
     :param force: Re-install a collection if it has already been installed.
     :param force_deps: Re-install a collection as well as its dependencies if they have already been installed.
+    :param upgrade: Upgrade installed collections to the latest available version.
     """
     existing_collections = {
         Requirement(coll.fqcn, coll.ver, coll.src, coll.type)
@@ -443,15 +445,15 @@ def install_collections(
     requested_requirements_names = {req.fqcn for req in unsatisfied_requirements}
 
     # NOTE: Don't attempt to reevaluate already installed deps
-    # NOTE: unless `--force` or `--force-with-deps` is passed
-    unsatisfied_requirements -= set() if force or force_deps else {
+    # NOTE: unless `--force`, `--force-with-deps`, or `--upgrade` is passed
+    unsatisfied_requirements -= set() if force or force_deps or upgrade else {
         req
         for req in unsatisfied_requirements
         for exs in existing_collections
         if req.fqcn == exs.fqcn and meets_requirements(exs.ver, req.ver)
     }
 
-    if not unsatisfied_requirements:
+    if not unsatisfied_requirements and not upgrade:
         display.display(
             'Nothing to do. All requested collections are already '
             'installed. If you want to reinstall them, '
@@ -468,7 +470,7 @@ def install_collections(
 
     preferred_requirements = (
         [] if force_deps
-        else existing_non_requested_collections if force
+        else existing_non_requested_collections if force or upgrade
         else existing_collections
     )
     preferred_collections = {
@@ -525,6 +527,17 @@ def install_collections(
             if concrete_coll_pin in preferred_collections:
                 display.display(
                     "Skipping '{coll!s}' as it is already installed".
+                    format(coll=to_text(concrete_coll_pin)),
+                )
+                continue
+
+            if upgrade and any(
+                concrete_coll_pin.fqcn == existing.fqcn
+                and concrete_coll_pin.ver == existing.ver
+                for existing in existing_collections
+            ):
+                display.display(
+                    "Skipping '{coll!s}' as it is already up-to-date".
                     format(coll=to_text(concrete_coll_pin)),
                 )
                 continue
