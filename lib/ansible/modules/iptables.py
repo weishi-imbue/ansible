@@ -314,6 +314,22 @@ options:
       - Specifies the GID or group to use in match by owner rule.
     type: str
     version_added: "2.9"
+  match_set:
+    description:
+      - Specifies a set name which can be defined by ipset.
+      - Must be used together with the C(match_set_flags) parameter.
+      - When specified, the module will use the iptables set extension
+        and add the C(-m set --match-set) clause to the rule.
+    type: str
+    version_added: "2.11"
+  match_set_flags:
+    description:
+      - Specifies the flags to use with C(match_set).
+      - Must be used together with the C(match_set) parameter.
+      - 'Possible values are: C(src), C(dst), C(src,dst), C(dst,src).'
+    type: str
+    choices: [ "src", "dst", "src,dst", "dst,src" ]
+    version_added: "2.11"
   reject_with:
     description:
       - 'Specifies the error packet type to return while rejecting. It implies
@@ -594,12 +610,6 @@ def construct_rule(params):
         append_match(rule, params['src_range'] or params['dst_range'], 'iprange')
         append_param(rule, params['src_range'], '--src-range', False)
         append_param(rule, params['dst_range'], '--dst-range', False)
-    if 'set' in params['match']:
-        if params['match_set']:
-            append_param(rule, params['match_set'] + ' ' + params['match_set_flags'], '--match-set', False)
-    elif params['match_set']:
-        append_match(rule, params['match_set'], 'set')
-        append_param(rule, params['match_set'] + ' ' + params['match_set_flags'], '--match-set', False)
     append_match(rule, params['limit'] or params['limit_burst'], 'limit')
     append_param(rule, params['limit'], '--limit', False)
     append_param(rule, params['limit_burst'], '--limit-burst', False)
@@ -731,8 +741,6 @@ def main():
             limit_burst=dict(type='str'),
             uid_owner=dict(type='str'),
             gid_owner=dict(type='str'),
-            match_set=dict(type='str'),
-            match_set_flags=dict(type='str', choices=['src', 'dst', 'src,dst', 'dst,src']),
             reject_with=dict(type='str'),
             icmp_type=dict(type='str'),
             syn=dict(type='str', default='ignore', choices=['ignore', 'match', 'negate']),
@@ -742,9 +750,6 @@ def main():
         mutually_exclusive=(
             ['set_dscp_mark', 'set_dscp_mark_class'],
             ['flush', 'policy'],
-        ),
-        required_together=(
-            ['match_set', 'match_set_flags'],
         ),
         required_if=[
             ['jump', 'TEE', ['gateway']],
