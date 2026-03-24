@@ -1434,10 +1434,30 @@ def prepare_multipart(fields):
 
     :raises TypeError: If fields is not a Mapping or contains invalid value types
     :raises ValueError: If a file field is missing required 'filename' or 'content'
+                        or if fields is empty
+
+    Example usage:
+        # Simple form fields
+        fields = {'username': 'john', 'password': 'secret'}
+        content_type, body = prepare_multipart(fields)
+
+        # File upload with content
+        fields = {
+            'file': {
+                'filename': 'data.txt',
+                'content': b'file content here',
+                'mime_type': 'text/plain'
+            }
+        }
+        content_type, body = prepare_multipart(fields)
     """
     # Type validation for fields parameter
     if not isinstance(fields, Mapping):
         raise TypeError("fields must be a Mapping (dict-like object), got %s" % type(fields).__name__)
+
+    # Validate that fields is not empty
+    if not fields:
+        raise ValueError("fields cannot be empty")
 
     # Generate boundary for multipart encoding
     boundary = '--------------------------%s' % uuid.uuid4().hex
@@ -1447,6 +1467,10 @@ def prepare_multipart(fields):
     form_parts = []
 
     for field_name, field_value in fields.items():
+        # Validate field name
+        if not field_name or not isinstance(field_name, (str, bytes)):
+            raise ValueError("Field name must be a non-empty string or bytes, got %s" % repr(field_name))
+
         form_parts.append(part_boundary)
 
         # Handle simple string/bytes fields
@@ -1467,6 +1491,10 @@ def prepare_multipart(fields):
             if not filename and not content:
                 raise ValueError("File field '%s' must contain either 'filename' or 'content' key" % field_name)
 
+            # Validate filename if provided
+            if filename is not None and not isinstance(filename, (str, bytes)):
+                raise ValueError("File field '%s' filename must be str or bytes, got %s" % (field_name, type(filename).__name__))
+
             # If only filename is provided, read file content
             if filename and not content:
                 try:
@@ -1474,6 +1502,10 @@ def prepare_multipart(fields):
                         content = f.read()
                 except (IOError, OSError) as e:
                     raise ValueError("Failed to read file '%s': %s" % (filename, to_native(e)))
+
+            # Validate content
+            if content is not None and not isinstance(content, (str, bytes)):
+                raise ValueError("File field '%s' content must be str or bytes, got %s" % (field_name, type(content).__name__))
 
             # Determine MIME type
             if not mime_type:
