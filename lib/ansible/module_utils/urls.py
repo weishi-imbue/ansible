@@ -35,7 +35,6 @@ this code instead.
 import atexit
 import base64
 import functools
-import mimetypes
 import netrc
 import os
 import platform
@@ -44,7 +43,6 @@ import socket
 import sys
 import tempfile
 import traceback
-import uuid
 
 from contextlib import contextmanager
 
@@ -58,10 +56,9 @@ import ansible.module_utils.six.moves.http_cookiejar as cookiejar
 import ansible.module_utils.six.moves.urllib.request as urllib_request
 import ansible.module_utils.six.moves.urllib.error as urllib_error
 
-from ansible.module_utils.six import PY3, string_types
+from ansible.module_utils.six import PY3
 
 from ansible.module_utils.basic import get_distribution
-from ansible.module_utils.common._collections_compat import Mapping
 from ansible.module_utils._text import to_bytes, to_native, to_text
 
 try:
@@ -1362,72 +1359,6 @@ class Request:
         """
 
         return self.open('DELETE', url, **kwargs)
-
-
-def prepare_multipart(fields):
-    """Prepare a multipart/form-data body from a mapping of fields.
-
-    :param fields: Mapping of field names to values. Values can be strings,
-        bytes, or Mappings with 'filename', 'content', and/or 'mime_type' keys.
-    :returns: Tuple of (content_type, body) where content_type includes the
-        boundary and body is the encoded multipart data.
-    """
-    if not isinstance(fields, Mapping):
-        raise TypeError('Mapping is required, cannot be type %s' % type(fields).__name__)
-
-    boundary = '--------------------------%s' % uuid.uuid4().hex
-    b_boundary = to_bytes(boundary)
-
-    parts = []
-    for field, value in fields.items():
-        if isinstance(value, string_types):
-            part = b"--" + b_boundary + b"\r\n"
-            part += b"Content-Disposition: form-data; name=\"" + to_bytes(field) + b"\"\r\n"
-            part += b"\r\n"
-            part += to_bytes(value) + b"\r\n"
-            parts.append(part)
-        elif isinstance(value, bytes):
-            part = b"--" + b_boundary + b"\r\n"
-            part += b"Content-Disposition: form-data; name=\"" + to_bytes(field) + b"\"\r\n"
-            part += b"\r\n"
-            part += value + b"\r\n"
-            parts.append(part)
-        elif isinstance(value, Mapping):
-            filename = value.get('filename')
-            content = value.get('content')
-            mime_type = value.get('mime_type')
-
-            if not filename and content is None:
-                raise ValueError('expected at least filename or content for field %s' % field)
-
-            if content is None:
-                with open(to_bytes(filename, errors='surrogate_or_strict'), 'rb') as f:
-                    content = f.read()
-            else:
-                content = to_bytes(content)
-
-            if not mime_type:
-                try:
-                    mime_type = mimetypes.guess_type(filename or '', strict=False)[0] or 'application/octet-stream'
-                except Exception:
-                    mime_type = 'application/octet-stream'
-
-            part = b"--" + b_boundary + b"\r\n"
-            part += b"Content-Disposition: form-data; name=\"" + to_bytes(field) + b"\""
-            if filename:
-                part += b"; filename=\"" + to_bytes(os.path.basename(filename)) + b"\""
-            part += b"\r\n"
-            part += b"Content-Type: " + to_bytes(mime_type) + b"\r\n"
-            part += b"\r\n"
-            part += content + b"\r\n"
-            parts.append(part)
-        else:
-            raise TypeError('value for field %s must be a string, bytes, or mapping, not %s' % (field, type(value).__name__))
-
-    body = b"".join(parts) + b"--" + b_boundary + b"--\r\n"
-    content_type = 'multipart/form-data; boundary=%s' % boundary
-
-    return content_type, body
 
 
 def open_url(url, data=None, headers=None, method=None, use_proxy=True,

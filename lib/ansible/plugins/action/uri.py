@@ -11,7 +11,6 @@ import os
 
 from ansible.errors import AnsibleError, AnsibleAction, _AnsibleActionDone, AnsibleActionFail
 from ansible.module_utils._text import to_native
-from ansible.module_utils.common._collections_compat import Mapping
 from ansible.module_utils.parsing.convert_bool import boolean
 from ansible.plugins.action import ActionBase
 
@@ -31,36 +30,8 @@ class ActionModule(ActionBase):
 
         src = self._task.args.get('src', None)
         remote_src = boolean(self._task.args.get('remote_src', 'no'), strict=False)
-        body_format = self._task.args.get('body_format', 'raw')
 
         try:
-            if body_format == 'form-multipart':
-                body = self._task.args.get('body', None)
-                if not isinstance(body, Mapping):
-                    raise AnsibleActionFail('body must be a mapping (dictionary) for body_format=form-multipart, not %s' % type(body).__name__)
-
-                new_module_args = self._task.args.copy()
-                for field, value in body.items():
-                    if isinstance(value, Mapping):
-                        filename = value.get('filename')
-                        content = value.get('content')
-                        if filename and content is None:
-                            try:
-                                found = self._find_needle('files', filename)
-                            except AnsibleError as e:
-                                raise AnsibleActionFail(to_native(e))
-                            tmp_src = self._connection._shell.join_path(
-                                self._connection._shell.tmpdir, os.path.basename(found))
-                            self._transfer_file(found, tmp_src)
-                            self._fixup_perms2((self._connection._shell.tmpdir, tmp_src))
-                            new_body = new_module_args['body']
-                            new_body[field] = dict(value)
-                            new_body[field]['filename'] = tmp_src
-
-                raise _AnsibleActionDone(result=self._execute_module('uri', module_args=new_module_args,
-                                                                     task_vars=task_vars,
-                                                                     wrap_async=self._task.async_val))
-
             if (src and remote_src) or not src:
                 # everything is remote, so we just execute the module
                 # without changing any of the module arguments
