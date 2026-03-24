@@ -373,6 +373,7 @@ from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils._text import to_native, to_text
 from ansible.module_utils.urls import fetch_url
 from ansible.module_utils.yumdnf import YumDnf, yumdnf_argument_spec
+from ansible.module_utils.common.respawn import has_respawned, respawn_module, probe_interpreters_for_module
 
 import errno
 import os
@@ -385,11 +386,27 @@ try:
 except ImportError:
     HAS_RPM_PYTHON = False
 
+    # Try to respawn under a compatible interpreter if we haven't already
+    import sys
+    if not has_respawned() and sys.executable != '/usr/bin/python':
+        interpreters = ['/usr/libexec/platform-python', '/usr/bin/python3', '/usr/bin/python2', '/usr/bin/python']
+        compatible_interpreter = probe_interpreters_for_module(interpreters, 'rpm')
+        if compatible_interpreter:
+            respawn_module(compatible_interpreter)
+
 try:
     import yum
     HAS_YUM_PYTHON = True
 except ImportError:
     HAS_YUM_PYTHON = False
+
+    # Try to respawn under a compatible interpreter if we haven't already
+    import sys
+    if not has_respawned() and sys.executable != '/usr/bin/python':
+        interpreters = ['/usr/libexec/platform-python', '/usr/bin/python3', '/usr/bin/python2', '/usr/bin/python']
+        compatible_interpreter = probe_interpreters_for_module(interpreters, 'yum')
+        if compatible_interpreter:
+            respawn_module(compatible_interpreter)
 
 try:
     from yum.misc import find_unfinished_transactions, find_ts_remaining
@@ -1598,11 +1615,12 @@ class YumModule(YumDnf):
         actually execute the module code backend
         """
 
+        import sys
         error_msgs = []
         if not HAS_RPM_PYTHON:
-            error_msgs.append('The Python 2 bindings for rpm are needed for this module. If you require Python 3 support use the `dnf` Ansible module instead.')
+            error_msgs.append('rpm-python must be installed and visible from {0}.'.format(sys.executable))
         if not HAS_YUM_PYTHON:
-            error_msgs.append('The Python 2 yum module is needed for this module. If you require Python 3 support use the `dnf` Ansible module instead.')
+            error_msgs.append('yum must be installed and visible from {0}.'.format(sys.executable))
 
         self.wait_for_lock()
 
