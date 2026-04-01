@@ -314,7 +314,8 @@ class Play(Base, Taggable, CollectionSearch):
                 if task_blocks:
                     for b in task_blocks:
                         wrapper = Block(play=self)
-                        wrapper.block = [b] if not isinstance(b.block, list) else b.block
+                        # b.block is always a list (NonInheritableFieldAttribute(isa='list'))
+                        wrapper.block = b.block
                         wrapper.rescue = b.rescue
                         wrapper.always = (b.always or []) + [flush_block]
                         result.append(wrapper)
