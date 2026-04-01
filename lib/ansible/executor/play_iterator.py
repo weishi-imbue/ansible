@@ -440,6 +440,15 @@ class PlayIterator:
                             task = None
                         state.cur_always_task += 1
 
+            elif state.run_state == IteratingStates.HANDLERS:
+                # Handle the handlers phase - iterate through handlers list
+                if state.cur_handlers_task >= len(state.handlers):
+                    # Done with handlers, move to complete
+                    state.run_state = IteratingStates.COMPLETE
+                else:
+                    task = state.handlers[state.cur_handlers_task]
+                    state.cur_handlers_task += 1
+
             elif state.run_state == IteratingStates.COMPLETE:
                 return (state, None)
 
