@@ -26,9 +26,10 @@ from ansible.module_utils.common.text.converters import to_bytes, to_text
 from ansible.plugins.shell import ShellBase
 
 # This is weird, we are matching on byte sequences that match the utf-16-be
-# matches for '_x(a-fA-F0-9){4}_'. The \x00 and {8} will match the hex sequence
-# when it is encoded as utf-16-be.
-_STRING_DESERIAL_FIND = re.compile(rb"\x00_\x00x([\x00(a-fA-F0-9)]{8})\x00_")
+# matches for '_x(a-fA-F0-9){4}_'. Each hex char is encoded as \x00 + ASCII byte
+# in utf-16-be, so we match 4 explicit pairs to avoid matching valid Unicode
+# escape sequences like _x6100_.
+_STRING_DESERIAL_FIND = re.compile(rb"\x00_\x00x((?:\x00[a-fA-F0-9]){4})\x00_")
 
 _common_args = ['PowerShell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Unrestricted']
 
@@ -89,6 +90,92 @@ def _parse_clixml(data: bytes, stream: str = "Error") -> bytes:
             lines.append(b_escaped.decode("utf-16-be", errors="surrogatepass"))
 
     return to_bytes(''.join(lines), errors="surrogatepass")
+
+
+def _replace_stderr_clixml(stderr: bytes) -> bytes:
+    """
+    Scan stderr line by line and replace any embedded CLIXML blocks with
+    their decoded text. Non-CLIXML content is preserved unchanged.
+    Returns the original input if no CLIXML is found or on any error.
+    """
+    CLIXML_HEADER = b"#< CLIXML"
+    result = []
+    clixml_lines: list[bytes] = []
+    in_clixml = False
+
+    lines = stderr.split(b"\r\n")
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        if not in_clixml:
+            if line == CLIXML_HEADER:
+                in_clixml = True
+                clixml_lines = [line]
+            else:
+                result.append(line)
+        else:
+            clixml_lines.append(line)
+
+            # Check if this line contains the end of a CLIXML block
+            if b"</Objs>" in line:
+                # Look ahead to see if there are more <Objs> blocks coming
+                # Continue accumulating until no more <Objs> blocks are found
+                j = i + 1
+                has_more_objs = False
+                while j < len(lines):
+                    next_line = lines[j]
+                    # If we find another <Objs> tag, we need to continue
+                    if b"<Objs " in next_line:
+                        has_more_objs = True
+                        break
+                    # If we find non-empty content that doesn't look like CLIXML, stop looking
+                    if next_line.strip() and not (b"<Objs" in next_line or b"</Objs>" in next_line or next_line.startswith(b"<")):
+                        break
+                    j += 1
+
+                # If no more <Objs> blocks found, process the accumulated CLIXML
+                if not has_more_objs:
+                    clixml_data = b"\r\n".join(clixml_lines)
+
+                    # Find where the last </Objs> ends to capture trailing data
+                    end_idx = clixml_data.rfind(b"</Objs>") + len(b"</Objs>")
+                    trailing = clixml_data[end_idx:]
+                    clixml_data = clixml_data[:end_idx]
+
+                    try:
+                        # Try UTF-8 first, fall back to cp437 if needed
+                        try:
+                            parsed = _parse_clixml(clixml_data)
+                        except UnicodeDecodeError:
+                            # Fallback to cp437 decoding
+                            clixml_data_decoded = clixml_data.decode("cp437")
+                            parsed = _parse_clixml(clixml_data_decoded.encode("utf-8"))
+
+                        # Strip trailing \r\n from parsed to avoid double line breaks
+                        if parsed.endswith(b"\r\n"):
+                            parsed = parsed[:-2]
+
+                        # Only append if we have content to append
+                        combined = parsed + trailing
+                        if combined:
+                            result.append(combined)
+
+                    except Exception:
+                        # On any error, leave original data unchanged
+                        result.extend(clixml_lines)
+
+                    in_clixml = False
+                    clixml_lines = []
+
+        i += 1
+
+    # If we ended while still in a CLIXML block (incomplete), preserve original
+    if in_clixml:
+        result.extend(clixml_lines)
+
+    return b"\r\n".join(result)
 
 
 class ShellModule(ShellBase):
