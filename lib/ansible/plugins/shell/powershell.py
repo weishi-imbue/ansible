@@ -103,7 +103,12 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
     clixml_lines: list[bytes] = []
     in_clixml = False
 
-    for line in stderr.split(b"\r\n"):
+    lines = stderr.split(b"\r\n")
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
         if not in_clixml:
             if line == CLIXML_HEADER:
                 in_clixml = True
@@ -112,29 +117,59 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
                 result.append(line)
         else:
             clixml_lines.append(line)
+
+            # Check if this line contains the end of a CLIXML block
             if b"</Objs>" in line:
-                # End of CLIXML block found - try to decode
-                clixml_data = b"\r\n".join(clixml_lines)
+                # Look ahead to see if there are more <Objs> blocks coming
+                # Continue accumulating until no more <Objs> blocks are found
+                j = i + 1
+                has_more_objs = False
+                while j < len(lines):
+                    next_line = lines[j]
+                    # If we find another <Objs> tag, we need to continue
+                    if b"<Objs " in next_line:
+                        has_more_objs = True
+                        break
+                    # If we find non-empty content that doesn't look like CLIXML, stop looking
+                    if next_line.strip() and not (b"<Objs" in next_line or b"</Objs>" in next_line or next_line.startswith(b"<")):
+                        break
+                    j += 1
 
-                # Find where the last </Objs> ends to capture trailing data
-                end_idx = clixml_data.rfind(b"</Objs>") + len(b"</Objs>")
-                trailing = clixml_data[end_idx:]
-                clixml_data = clixml_data[:end_idx]
+                # If no more <Objs> blocks found, process the accumulated CLIXML
+                if not has_more_objs:
+                    clixml_data = b"\r\n".join(clixml_lines)
 
-                try:
+                    # Find where the last </Objs> ends to capture trailing data
+                    end_idx = clixml_data.rfind(b"</Objs>") + len(b"</Objs>")
+                    trailing = clixml_data[end_idx:]
+                    clixml_data = clixml_data[:end_idx]
+
                     try:
-                        decoded_data = clixml_data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        decoded_data = clixml_data.decode("cp437").encode("utf-8").decode("utf-8")
+                        # Try UTF-8 first, fall back to cp437 if needed
+                        try:
+                            parsed = _parse_clixml(clixml_data)
+                        except UnicodeDecodeError:
+                            # Fallback to cp437 decoding
+                            clixml_data_decoded = clixml_data.decode("cp437")
+                            parsed = _parse_clixml(clixml_data_decoded.encode("utf-8"))
 
-                    parsed = _parse_clixml(decoded_data.encode("utf-8"))
-                    result.append(parsed + trailing)
-                except Exception:
-                    # On any error, leave original data unchanged
-                    result.extend(clixml_lines)
+                        # Strip trailing \r\n from parsed to avoid double line breaks
+                        if parsed.endswith(b"\r\n"):
+                            parsed = parsed[:-2]
 
-                in_clixml = False
-                clixml_lines = []
+                        # Only append if we have content to append
+                        combined = parsed + trailing
+                        if combined:
+                            result.append(combined)
+
+                    except Exception:
+                        # On any error, leave original data unchanged
+                        result.extend(clixml_lines)
+
+                    in_clixml = False
+                    clixml_lines = []
+
+        i += 1
 
     # If we ended while still in a CLIXML block (incomplete), preserve original
     if in_clixml:

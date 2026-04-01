@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from ansible.plugins.shell.powershell import _parse_clixml, ShellModule
+from ansible.plugins.shell.powershell import _parse_clixml, _replace_stderr_clixml, ShellModule
 
 
 def test_parse_clixml_empty():
@@ -110,4 +110,85 @@ def test_join_path_unc():
     unc_path_parts = ['\\\\host\\share\\dir1\\\\dir2\\', '\\dir3/dir4', 'dir5', 'dir6\\']
     expected = '\\\\host\\share\\dir1\\dir2\\dir3\\dir4\\dir5\\dir6'
     actual = pwsh.join_path(*unc_path_parts)
+    assert actual == expected
+
+
+def test_replace_stderr_clixml_no_clixml():
+    """Test that non-CLIXML content is preserved unchanged"""
+    stderr = b"Some regular error\r\nAnother line\r\n"
+    expected = stderr
+    actual = _replace_stderr_clixml(stderr)
+    assert actual == expected
+
+
+def test_replace_stderr_clixml_simple_block():
+    """Test basic CLIXML replacement"""
+    stderr = b'#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' \
+             b'<S S="Error">test error_x000D__x000A_</S></Objs>'
+    expected = b'test error'  # Note: trailing \r\n stripped to prevent double line break
+    actual = _replace_stderr_clixml(stderr)
+    assert actual == expected
+
+
+def test_replace_stderr_clixml_with_non_clixml_content():
+    """Test CLIXML replacement with surrounding non-CLIXML content"""
+    stderr = b'Before content\r\n' \
+             b'#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' \
+             b'<S S="Error">test error_x000D__x000A_</S></Objs>\r\n' \
+             b'After content'
+    expected = b'Before content\r\ntest error\r\nAfter content'
+    actual = _replace_stderr_clixml(stderr)
+    assert actual == expected
+
+
+def test_replace_stderr_clixml_empty_block():
+    """Test empty CLIXML blocks don't inject spurious blank lines (Review Comment 1)"""
+    stderr = b'Before\r\n' \
+             b'#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"></Objs>\r\n' \
+             b'After'
+    expected = b'Before\r\nAfter'  # No empty line where empty CLIXML block was
+    actual = _replace_stderr_clixml(stderr)
+    assert actual == expected
+
+
+def test_replace_stderr_clixml_multiple_blocks():
+    """Test multiple separate CLIXML blocks are all decoded (Review Comment 2)"""
+    stderr = b'#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' \
+             b'<S S="Error">Error 1_x000D__x000A_</S></Objs>\r\n' \
+             b'<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' \
+             b'<S S="Error">Error 2_x000D__x000A_</S></Objs>'
+    # _parse_clixml adds a separator between multiple <Objs> elements
+    expected = b'Error 1\r\n\r\nError 2'  # Both blocks decoded with separator, trailing \r\n stripped
+    actual = _replace_stderr_clixml(stderr)
+    assert actual == expected
+
+
+def test_replace_stderr_clixml_trailing_content_after_block():
+    """Test trailing content on same line as </Objs> is preserved"""
+    stderr = b'#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' \
+             b'<S S="Error">test error_x000D__x000A_</S></Objs> trailing content'
+    expected = b'test error trailing content'  # Decoded content plus trailing preserved
+    actual = _replace_stderr_clixml(stderr)
+    assert actual == expected
+
+
+def test_replace_stderr_clixml_incomplete_block():
+    """Test incomplete CLIXML blocks are left unchanged"""
+    stderr = b'#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' \
+             b'<S S="Error">incomplete'
+    expected = stderr  # Should be unchanged since no closing </Objs>
+    actual = _replace_stderr_clixml(stderr)
+    assert actual == expected
+
+
+def test_replace_stderr_clixml_no_trailing_newline_injection():
+    """Test that parsed content ending with \\r\\n doesn't create double line breaks (Review Comment 1)"""
+    stderr = b'Before\r\n' \
+             b'#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' \
+             b'<S S="Error">error with newline_x000D__x000A_</S></Objs>\r\n' \
+             b'After'
+    # _parse_clixml typically returns "error with newline\r\n", but we strip the \r\n
+    # so when joined with \r\n separator, we get single line breaks, not double
+    expected = b'Before\r\nerror with newline\r\nAfter'
+    actual = _replace_stderr_clixml(stderr)
     assert actual == expected
