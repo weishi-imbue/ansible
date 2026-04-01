@@ -1,0 +1,36 @@
+diff --git a/lib/ansible/modules/iptables.py b/lib/ansible/modules/iptables.py
+index ab1e8ef74c..de95e3a1fd 100644
+--- a/lib/ansible/modules/iptables.py
++++ b/lib/ansible/modules/iptables.py
+@@ -594,6 +594,12 @@ def construct_rule(params):
+         append_match(rule, params['src_range'] or params['dst_range'], 'iprange')
+         append_param(rule, params['src_range'], '--src-range', False)
+         append_param(rule, params['dst_range'], '--dst-range', False)
++    if 'set' in params['match']:
++        if params['match_set']:
++            append_param(rule, params['match_set'] + ' ' + params['match_set_flags'], '--match-set', False)
++    elif params['match_set']:
++        append_match(rule, params['match_set'], 'set')
++        append_param(rule, params['match_set'] + ' ' + params['match_set_flags'], '--match-set', False)
+     append_match(rule, params['limit'] or params['limit_burst'], 'limit')
+     append_param(rule, params['limit'], '--limit', False)
+     append_param(rule, params['limit_burst'], '--limit-burst', False)
+@@ -725,6 +731,8 @@ def main():
+             limit_burst=dict(type='str'),
+             uid_owner=dict(type='str'),
+             gid_owner=dict(type='str'),
++            match_set=dict(type='str'),
++            match_set_flags=dict(type='str', choices=['src', 'dst', 'src,dst', 'dst,src']),
+             reject_with=dict(type='str'),
+             icmp_type=dict(type='str'),
+             syn=dict(type='str', default='ignore', choices=['ignore', 'match', 'negate']),
+@@ -735,6 +743,9 @@ def main():
+             ['set_dscp_mark', 'set_dscp_mark_class'],
+             ['flush', 'policy'],
+         ),
++        required_together=(
++            ['match_set', 'match_set_flags'],
++        ),
+         required_if=[
+             ['jump', 'TEE', ['gateway']],
+             ['jump', 'tee', ['gateway']],

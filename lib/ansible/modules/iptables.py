@@ -290,6 +290,19 @@ options:
       - Specifies the destination IP range to match in the iprange module.
     type: str
     version_added: "2.8"
+  match_set:
+    description:
+      - Specifies the name of the ipset to be matched against.
+      - This parameter requires C(match_set_flags) to be specified as well.
+      - The ipset must already exist on the target system.
+    type: str
+  match_set_flags:
+    description:
+      - Specifies the direction(s) in which to match the ipset.
+      - This parameter requires C(match_set) to be specified as well.
+      - Valid values include C(src), C(dst), or combinations like C(src,dst), C(src,src), etc.
+      - The available flags depend on the ipset type and dimensionality.
+    type: str
   limit:
     description:
       - Specifies the maximum average number of matches to allow per second.
@@ -594,6 +607,12 @@ def construct_rule(params):
         append_match(rule, params['src_range'] or params['dst_range'], 'iprange')
         append_param(rule, params['src_range'], '--src-range', False)
         append_param(rule, params['dst_range'], '--dst-range', False)
+    if 'set' in params['match']:
+        if params['match_set']:
+            rule.extend(['--match-set', params['match_set'], params['match_set_flags']])
+    elif params['match_set']:
+        append_match(rule, params['match_set'], 'set')
+        rule.extend(['--match-set', params['match_set'], params['match_set_flags']])
     append_match(rule, params['limit'] or params['limit_burst'], 'limit')
     append_param(rule, params['limit'], '--limit', False)
     append_param(rule, params['limit_burst'], '--limit-burst', False)
@@ -725,6 +744,8 @@ def main():
             limit_burst=dict(type='str'),
             uid_owner=dict(type='str'),
             gid_owner=dict(type='str'),
+            match_set=dict(type='str'),
+            match_set_flags=dict(type='str'),
             reject_with=dict(type='str'),
             icmp_type=dict(type='str'),
             syn=dict(type='str', default='ignore', choices=['ignore', 'match', 'negate']),
@@ -734,6 +755,9 @@ def main():
         mutually_exclusive=(
             ['set_dscp_mark', 'set_dscp_mark_class'],
             ['flush', 'policy'],
+        ),
+        required_together=(
+            ['match_set', 'match_set_flags'],
         ),
         required_if=[
             ['jump', 'TEE', ['gateway']],
