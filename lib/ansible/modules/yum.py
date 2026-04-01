@@ -1608,10 +1608,10 @@ class YumModule(YumDnf):
                     respawn_module(interpreter)
 
         if not HAS_RPM_PYTHON:
-            error_msgs.append('The Python 2 bindings for rpm are needed for this module. If you require Python 3 support use the `dnf` Ansible module instead.. '
+            error_msgs.append('The Python 2 bindings for rpm are needed for this module. If you require Python 3 support use the `dnf` Ansible module instead. '
                               'Please install the python-rpm package or ensure you have specified the correct ansible_python_interpreter. ({0})'.format(sys.executable))
         if not HAS_YUM_PYTHON:
-            error_msgs.append('The Python 2 yum module is needed for this module. If you require Python 3 support use the `dnf` Ansible module instead.. '
+            error_msgs.append('The Python 2 yum module is needed for this module. If you require Python 3 support use the `dnf` Ansible module instead. '
                               'Please install the yum package or ensure you have specified the correct ansible_python_interpreter. ({0})'.format(sys.executable))
 
         self.wait_for_lock()
