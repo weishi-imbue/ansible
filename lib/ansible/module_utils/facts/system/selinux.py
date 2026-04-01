@@ -21,7 +21,7 @@ __metaclass__ = type
 from ansible.module_utils.facts.collector import BaseFactCollector
 
 try:
-    from ansible.module_utils.compat import selinux
+    import selinux
     HAVE_SELINUX = True
 except ImportError:
     HAVE_SELINUX = False
