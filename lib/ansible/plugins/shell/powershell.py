@@ -103,6 +103,29 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
     clixml_lines: list[bytes] = []
     in_clixml = False
 
+    def _flush_clixml():
+        """Process accumulated clixml_lines and append result."""
+        clixml_data = b"\r\n".join(clixml_lines)
+
+        # Find where the last </Objs> ends to capture trailing data
+        end_idx = clixml_data.rfind(b"</Objs>") + len(b"</Objs>")
+        trailing = clixml_data[end_idx:]
+        clixml_data = clixml_data[:end_idx]
+
+        try:
+            parsed = _parse_clixml(clixml_data)
+            # Strip trailing \r\n from parsed to avoid double newlines
+            # when joined with b"\r\n".join(result)
+            if parsed.endswith(b"\r\n"):
+                parsed = parsed[:-2]
+            combined = parsed + trailing
+            # Skip empty entries (e.g. progress-only CLIXML blocks)
+            if combined:
+                result.append(combined)
+        except Exception:
+            # On any error, leave original data unchanged
+            result.extend(clixml_lines)
+
     for line in stderr.split(b"\r\n"):
         if not in_clixml:
             if line == CLIXML_HEADER:
@@ -111,33 +134,24 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
             else:
                 result.append(line)
         else:
+            # Check if this line starts a new <Objs> block after we already
+            # finished one (clixml_lines is empty after a flush)
+            if not clixml_lines and not line.lstrip().startswith(b"<Objs"):
+                # No longer in CLIXML territory, treat as normal line
+                in_clixml = False
+                result.append(line)
+                continue
+
             clixml_lines.append(line)
             if b"</Objs>" in line:
-                # End of CLIXML block found - try to decode
-                clixml_data = b"\r\n".join(clixml_lines)
-
-                # Find where the last </Objs> ends to capture trailing data
-                end_idx = clixml_data.rfind(b"</Objs>") + len(b"</Objs>")
-                trailing = clixml_data[end_idx:]
-                clixml_data = clixml_data[:end_idx]
-
-                try:
-                    try:
-                        decoded_data = clixml_data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        decoded_data = clixml_data.decode("cp437").encode("utf-8").decode("utf-8")
-
-                    parsed = _parse_clixml(decoded_data.encode("utf-8"))
-                    result.append(parsed + trailing)
-                except Exception:
-                    # On any error, leave original data unchanged
-                    result.extend(clixml_lines)
-
-                in_clixml = False
+                # End of CLIXML block found - process accumulated lines
+                _flush_clixml()
+                # Stay in in_clixml mode but reset lines, in case another
+                # <Objs> block follows on the next line
                 clixml_lines = []
 
     # If we ended while still in a CLIXML block (incomplete), preserve original
-    if in_clixml:
+    if in_clixml and clixml_lines:
         result.extend(clixml_lines)
 
     return b"\r\n".join(result)
