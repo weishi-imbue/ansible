@@ -387,6 +387,20 @@ class Block(Base, Conditional, CollectionSearch, Taggable):
 
         return evaluate_block(self)
 
+    def get_tasks(self):
+        '''
+        Returns a flat list of all tasks within the block, including tasks
+        in block, rescue, and always sections, recursively handling nested blocks.
+        '''
+        task_list = []
+        for section in (self.block, self.rescue, self.always):
+            for task in (section or []):
+                if isinstance(task, Block):
+                    task_list.extend(task.get_tasks())
+                else:
+                    task_list.append(task)
+        return task_list
+
     def has_tasks(self):
         return len(self.block) > 0 or len(self.rescue) > 0 or len(self.always) > 0
 
