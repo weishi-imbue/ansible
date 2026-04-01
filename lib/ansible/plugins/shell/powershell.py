@@ -102,17 +102,39 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
     result = []
     clixml_lines: list[bytes] = []
     in_clixml = False
+    objs_depth = 0
+    seen_clixml_header = False
 
     for line in stderr.split(b"\r\n"):
         if not in_clixml:
             if line == CLIXML_HEADER:
                 in_clixml = True
+                seen_clixml_header = True
                 clixml_lines = [line]
+                objs_depth = 0
+            elif seen_clixml_header and line.startswith(b"<Objs "):
+                # New CLIXML block after we've seen the header
+                in_clixml = True
+                clixml_lines = [line]
+                objs_depth = line.count(b"<Objs ") - line.count(b"</Objs>")
             else:
                 result.append(line)
-        else:
-            clixml_lines.append(line)
-            if b"</Objs>" in line:
+
+        # Process CLIXML lines if we're in CLIXML mode
+        if in_clixml and line != CLIXML_HEADER:
+            # Add line to clixml_lines if not already added when entering CLIXML mode
+            already_added = (seen_clixml_header and line.startswith(b"<Objs ") and
+                            len(clixml_lines) == 1 and clixml_lines[0] == line)
+
+            if not already_added:
+                clixml_lines.append(line)
+
+            # Count <Objs> opening and </Objs> closing tags
+            objs_depth += line.count(b"<Objs ")
+            objs_depth -= line.count(b"</Objs>")
+
+            # Process the block when all <Objs> tags are closed
+            if objs_depth == 0 and b"</Objs>" in line:
                 # End of CLIXML block found - try to decode
                 clixml_data = b"\r\n".join(clixml_lines)
 
@@ -122,17 +144,23 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
                 clixml_data = clixml_data[:end_idx]
 
                 try:
-                    try:
-                        decoded_data = clixml_data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        decoded_data = clixml_data.decode("cp437").encode("utf-8").decode("utf-8")
+                    # Fix: Call _parse_clixml directly without unnecessary decode/encode
+                    parsed = _parse_clixml(clixml_data)
 
-                    parsed = _parse_clixml(decoded_data.encode("utf-8"))
-                    result.append(parsed + trailing)
+                    # Fix: Strip trailing \r\n from parsed to avoid double newlines
+                    if parsed.endswith(b"\r\n"):
+                        parsed = parsed[:-2]
+
+                    combined = parsed + trailing
+
+                    # Fix: Skip appending if combined result is empty to avoid blank lines
+                    if combined:
+                        result.append(combined)
                 except Exception:
                     # On any error, leave original data unchanged
                     result.extend(clixml_lines)
 
+                # Reset for potential next block
                 in_clixml = False
                 clixml_lines = []
 

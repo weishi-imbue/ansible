@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from ansible.plugins.shell.powershell import _parse_clixml, ShellModule
+from ansible.plugins.shell.powershell import _parse_clixml, _replace_stderr_clixml, ShellModule
 
 
 def test_parse_clixml_empty():
@@ -103,6 +103,96 @@ def test_parse_clixml_with_comlex_escaped_chars(clixml, expected):
 
     actual = _parse_clixml(clixml_data)
     assert actual == b_expected
+
+
+def test_replace_stderr_clixml_no_clixml():
+    """Test that non-CLIXML stderr is returned unchanged."""
+    stderr = b"normal error message\r\nline two\r\nline three"
+    result = _replace_stderr_clixml(stderr)
+    assert result == stderr
+
+
+def test_replace_stderr_clixml_basic():
+    """Test basic CLIXML replacement functionality."""
+    stderr = b"#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" \
+             b"<S S=\"Error\">test error_x000D__x000A_</S></Objs>"
+    result = _replace_stderr_clixml(stderr)
+    expected = b"test error"
+    assert result == expected
+
+
+def test_replace_stderr_clixml_with_prefix_and_suffix():
+    """Test CLIXML with non-CLIXML content before and after."""
+    stderr = b"prefix line\r\n#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" \
+             b"<S S=\"Error\">test error_x000D__x000A_</S></Objs>\r\nsuffix line"
+    result = _replace_stderr_clixml(stderr)
+    expected = b"prefix line\r\ntest error\r\nsuffix line"
+    assert result == expected
+
+
+def test_replace_stderr_clixml_no_spurious_blank_lines():
+    """Test fix for spurious blank lines (review comment 1, issue 1)."""
+    # CLIXML block that produces output ending with \r\n
+    stderr = b"prefix\r\n#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" \
+             b"<S S=\"Error\">Error message_x000D__x000A_</S></Objs>\r\nsuffix"
+    result = _replace_stderr_clixml(stderr)
+    expected = b"prefix\r\nError message\r\nsuffix"
+    assert result == expected
+    # Ensure no double \r\n (which would appear as empty line)
+    assert b"\r\n\r\n" not in result
+
+
+def test_replace_stderr_clixml_empty_clixml_no_blank_lines():
+    """Test fix for spurious blank lines (review comment 1, issue 2)."""
+    # CLIXML block with only progress data (returns empty bytes)
+    stderr = b"line1\r\n#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" \
+             b"<Obj S=\"progress\" RefId=\"0\"><TN RefId=\"0\"><T>System.Management.Automation.PSCustomObject</T>" \
+             b"<T>System.Object</T></TN><MS><I64 N=\"SourceId\">1</I64><PR N=\"Record\">" \
+             b"<AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC>" \
+             b"<T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>\r\nline2"
+    result = _replace_stderr_clixml(stderr)
+    expected = b"line1\r\nline2"
+    assert result == expected
+    # Ensure no blank lines where CLIXML was
+    assert b"\r\n\r\n" not in result
+
+
+def test_replace_stderr_clixml_multiple_blocks_separate_lines():
+    """Test fix for multiple CLIXML blocks on separate lines (review comment 2)."""
+    stderr = b"#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" \
+             b"<S S=\"Error\">Error 1</S></Objs>\r\n" \
+             b"<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" \
+             b"<S S=\"Error\">Error 2</S></Objs>"
+    result = _replace_stderr_clixml(stderr)
+    expected = b"Error 1\r\nError 2"
+    assert result == expected
+
+
+def test_replace_stderr_clixml_with_trailing_data():
+    """Test CLIXML with trailing data on same line after </Objs>."""
+    stderr = b"#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" \
+             b"<S S=\"Error\">test</S></Objs>trailing data"
+    result = _replace_stderr_clixml(stderr)
+    expected = b"testtrailing data"
+    assert result == expected
+
+
+def test_replace_stderr_clixml_incomplete_block():
+    """Test that incomplete CLIXML blocks are left unchanged."""
+    stderr = b"#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" \
+             b"<S S=\"Error\">incomplete"
+    result = _replace_stderr_clixml(stderr)
+    # Should return original unchanged
+    assert result == stderr
+
+
+def test_replace_stderr_clixml_invalid_xml():
+    """Test that invalid XML in CLIXML block is left unchanged."""
+    stderr = b"#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">" \
+             b"<S S=\"Error\">invalid xml<unclosed></Objs>"
+    result = _replace_stderr_clixml(stderr)
+    # Should return original unchanged due to XML parsing error
+    assert result == stderr
 
 
 def test_join_path_unc():
