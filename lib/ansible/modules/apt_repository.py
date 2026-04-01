@@ -562,8 +562,7 @@ def main():
         if params['install_python_apt']:
             install_python_apt(module)
         else:
-            if not HAVE_PYTHON_APT:
-                module.fail_json(msg="{0} must be installed and visible from {1}.".format(PYTHON_APT, sys.executable))
+            module.fail_json(msg="{0} must be installed and visible from {1}.".format(PYTHON_APT, sys.executable))
 
     if not repo:
         module.fail_json(msg='Please set argument \'repo\' to a non-empty value')
