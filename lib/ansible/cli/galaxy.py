@@ -591,8 +591,42 @@ class GalaxyCLI(CLI):
                         raise AnsibleError("Collections requirement entry should contain the key name.")
 
                     req_version = collection_req.get('version', '*')
+                    req_type = collection_req.get('type', None)
                     req_source = collection_req.get('source', None)
-                    if req_source:
+                    req_src = collection_req.get('src', None)
+                    req_scm = collection_req.get('scm', None)
+                    req_path = None
+
+                    # Determine the type from explicit type/scm keys or by inferring from the URL
+                    if req_type == 'git' or req_scm == 'git':
+                        req_type = 'git'
+                        if req_src:
+                            req_name = req_src
+                    elif req_src and (req_src.endswith('.git') or req_src.startswith('git@') or req_src.startswith('git+') or '.git#' in req_src):
+                        req_type = 'git'
+                        req_name = req_src
+                    elif req_name and (req_name.endswith('.git') or req_name.startswith('git@') or req_name.startswith('git+') or '.git#' in req_name):
+                        req_type = 'git'
+
+                    if req_type == 'git':
+                        # Parse git URL fragments for path and version
+                        if '#' in req_name:
+                            req_name, fragment = req_name.split('#', 1)
+                            if ',' in fragment:
+                                req_path, frag_version = fragment.rsplit(',', 1)
+                                if req_version == '*':
+                                    req_version = frag_version
+                            else:
+                                req_path = fragment
+                        if req_version == '*':
+                            req_version = None
+                        # Strip leading slash from path
+                        if req_path and req_path.startswith('/'):
+                            req_path = req_path[1:]
+                        requirements['collections'].append((req_name, req_version, req_type, req_path))
+                    elif req_source:
+                        if not req_type:
+                            req_type = 'galaxy'
                         # Try and match up the requirement source with our list of Galaxy API servers defined in the
                         # config, otherwise create a server with that URL without any auth.
                         req_source = next(iter([a for a in self.api_servers if req_source in [a.name, a.api_server]]),
@@ -601,9 +635,30 @@ class GalaxyCLI(CLI):
                                                     req_source,
                                                     validate_certs=not context.CLIARGS['ignore_certs']))
 
-                    requirements['collections'].append((req_name, req_version, req_source))
+                        requirements['collections'].append((req_name, req_version, req_source, None))
+                    else:
+                        if not req_type:
+                            req_type = 'galaxy'
+                        requirements['collections'].append((req_name, req_version, req_type, req_path))
                 else:
-                    requirements['collections'].append((collection_req, '*', None))
+                    collection_req_str = to_text(collection_req, errors='surrogate_or_strict')
+                    # Check if this is a git URL specified as a plain string
+                    if collection_req_str.endswith('.git') or collection_req_str.startswith('git@') or \
+                            collection_req_str.startswith('git+') or '.git#' in collection_req_str:
+                        req_name = collection_req_str
+                        req_version = None
+                        req_path = None
+                        if '#' in req_name:
+                            req_name, fragment = req_name.split('#', 1)
+                            if ',' in fragment:
+                                req_path, req_version = fragment.rsplit(',', 1)
+                            else:
+                                req_path = fragment
+                        if req_path and req_path.startswith('/'):
+                            req_path = req_path[1:]
+                        requirements['collections'].append((req_name, req_version, 'git', req_path))
+                    else:
+                        requirements['collections'].append((collection_req, '*', 'galaxy', None))
 
         return requirements
 
@@ -704,13 +759,24 @@ class GalaxyCLI(CLI):
             requirements = {'collections': [], 'roles': []}
             for collection_input in collections:
                 requirement = None
-                if os.path.isfile(to_bytes(collection_input, errors='surrogate_or_strict')) or \
-                        urlparse(collection_input).scheme.lower() in ['http', 'https']:
-                    # Arg is a file path or URL to a collection
+                if os.path.isfile(to_bytes(collection_input, errors='surrogate_or_strict')):
+                    # Arg is a file path to a collection
                     name = collection_input
+                    requirements['collections'].append((name, requirement or '*', 'file', None))
+                elif urlparse(collection_input).scheme.lower() in ['http', 'https']:
+                    if collection_input.endswith('.git'):
+                        # Arg is a git URL
+                        requirements['collections'].append((collection_input, None, 'git', None))
+                    else:
+                        # Arg is a URL to a collection tarball
+                        name = collection_input
+                        requirements['collections'].append((name, requirement or '*', 'url', None))
+                elif collection_input.startswith('git@') or collection_input.startswith('git+'):
+                    # Arg is a git SSH URL
+                    requirements['collections'].append((collection_input, None, 'git', None))
                 else:
                     name, dummy, requirement = collection_input.partition(':')
-                requirements['collections'].append((name, requirement or '*', None))
+                    requirements['collections'].append((name, requirement or '*', 'galaxy', None))
         return requirements
 
     ############################
