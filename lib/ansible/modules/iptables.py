@@ -290,6 +290,21 @@ options:
       - Specifies the destination IP range to match in the iprange module.
     type: str
     version_added: "2.8"
+  match_set:
+    description:
+      - Specifies the name of the ipset to match against.
+      - This parameter is used with the iptables set extension to match packets against IP sets managed by ipset.
+      - Must be used together with C(match_set_flags).
+    type: str
+    version_added: "2.12"
+  match_set_flags:
+    description:
+      - Specifies the flags for the ipset match.
+      - Indicates which part of the packet should be checked against the set (src, dst, or combinations for multi-dimensional sets).
+      - Valid values include C(src), C(dst), C(src,dst), C(dst,src), C(src,src), C(dst,dst), and other combinations for multi-dimensional ipsets.
+      - Must be used together with C(match_set).
+    type: str
+    version_added: "2.12"
   limit:
     description:
       - Specifies the maximum average number of matches to allow per second.
@@ -596,10 +611,10 @@ def construct_rule(params):
         append_param(rule, params['dst_range'], '--dst-range', False)
     if 'set' in params['match']:
         if params['match_set']:
-            append_param(rule, params['match_set'] + ' ' + params['match_set_flags'], '--match-set', False)
+            rule.extend(['--match-set', params['match_set'], params['match_set_flags']])
     elif params['match_set']:
         append_match(rule, params['match_set'], 'set')
-        append_param(rule, params['match_set'] + ' ' + params['match_set_flags'], '--match-set', False)
+        rule.extend(['--match-set', params['match_set'], params['match_set_flags']])
     append_match(rule, params['limit'] or params['limit_burst'], 'limit')
     append_param(rule, params['limit'], '--limit', False)
     append_param(rule, params['limit_burst'], '--limit-burst', False)
@@ -732,7 +747,7 @@ def main():
             uid_owner=dict(type='str'),
             gid_owner=dict(type='str'),
             match_set=dict(type='str'),
-            match_set_flags=dict(type='str', choices=['src', 'dst', 'src,dst', 'dst,src']),
+            match_set_flags=dict(type='str'),
             reject_with=dict(type='str'),
             icmp_type=dict(type='str'),
             syn=dict(type='str', default='ignore', choices=['ignore', 'match', 'negate']),
