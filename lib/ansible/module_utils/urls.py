@@ -1029,9 +1029,11 @@ def prepare_multipart(fields):
         the ``multipart/form-data`` ``Content-Type`` header including
         ``boundary`` and ``body`` is the prepared bytestring body
 
-    Payload content from a file will be base64 encoded and will include
-    the appropriate ``Content-Transfer-Encoding`` and ``Content-Type``
-    headers.
+    Payload content from a file will be encoded according to the
+    ``multipart_encoding`` field (default: base64). Supported values
+    are ``base64`` and ``7or8bit``. The appropriate
+    ``Content-Transfer-Encoding`` and ``Content-Type`` headers will
+    be included.
 
     Example:
         {
@@ -1043,6 +1045,11 @@ def prepare_multipart(fields):
                 "content": "text based file content",
                 "filename": "fake.txt",
                 "mime_type": "text/plain",
+            },
+            "file3": {
+                "filename": "/tmp/upload.json",
+                "mime_type": "application/json",
+                "multipart_encoding": "7or8bit",
             },
             "text_form_field": "value"
         }
@@ -1081,6 +1088,12 @@ def prepare_multipart(fields):
         multipart_encoding = None
         if isinstance(value, Mapping):
             multipart_encoding = value.get('multipart_encoding')
+
+        if multipart_encoding and content:
+            raise ValueError(
+                'multipart_encoding is only supported for file-based content, '
+                'it cannot be used together with content'
+            )
 
         if not content and filename:
             if multipart_encoding:
