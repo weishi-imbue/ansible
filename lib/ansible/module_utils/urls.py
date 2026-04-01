@@ -30,6 +30,7 @@ this code instead.
 from __future__ import annotations
 
 import base64
+import email.encoders
 import email.mime.application
 import email.mime.multipart
 import email.mime.nonmultipart
@@ -1004,6 +1005,22 @@ def open_url(url, data=None, headers=None, method=None, use_proxy=True,
                           unredirected_headers=unredirected_headers, decompress=decompress, ciphers=ciphers, use_netrc=use_netrc)
 
 
+def set_multipart_encoding(encoding):
+    """Map a multipart encoding type string to an encoder function.
+
+    :arg encoding: string specifying the encoding type ('base64' or '7or8bit')
+    :returns: encoder function from email.encoders
+    :raises ValueError: if the encoding type is not supported
+    """
+    encoders = {
+        'base64': email.encoders.encode_base64,
+        '7or8bit': email.encoders.encode_7or8bit,
+    }
+    if encoding not in encoders:
+        raise ValueError('Unsupported encoding type: %s, valid values are: %s' % (encoding, ', '.join(encoders)))
+    return encoders[encoding]
+
+
 def prepare_multipart(fields):
     """Takes a mapping, and prepares a multipart/form-data body
 
@@ -1012,9 +1029,10 @@ def prepare_multipart(fields):
         the ``multipart/form-data`` ``Content-Type`` header including
         ``boundary`` and ``body`` is the prepared bytestring body
 
-    Payload content from a file will be base64 encoded and will include
+    Payload content from a file will be base64 encoded by default and will include
     the appropriate ``Content-Transfer-Encoding`` and ``Content-Type``
-    headers.
+    headers. The encoding can be controlled by specifying the ``multipart_encoding``
+    parameter (supported values: 'base64', '7or8bit').
 
     Example:
         {
@@ -1026,6 +1044,11 @@ def prepare_multipart(fields):
                 "content": "text based file content",
                 "filename": "fake.txt",
                 "mime_type": "text/plain",
+            },
+            "file3": {
+                "filename": "/path/to/file.json",
+                "mime_type": "application/json",
+                "multipart_encoding": "7or8bit"
             },
             "text_form_field": "value"
         }
@@ -1061,14 +1084,28 @@ def prepare_multipart(fields):
                 'value must be a string, or mapping, cannot be type %s' % value.__class__.__name__
             )
 
+        multipart_encoding = None
+        if isinstance(value, Mapping):
+            multipart_encoding = value.get('multipart_encoding')
+
         if not content and filename:
-            with open(to_bytes(filename, errors='surrogate_or_strict'), 'rb') as f:
-                part = email.mime.application.MIMEApplication(f.read())
-                del part['Content-Type']
-                part.add_header('Content-Type', '%s/%s' % (main_type, sub_type))
+            if multipart_encoding:
+                encoder = set_multipart_encoding(multipart_encoding)
+                with open(to_bytes(filename, errors='surrogate_or_strict'), 'rb') as f:
+                    part = email.mime.nonmultipart.MIMENonMultipart(main_type, sub_type)
+                    part.set_payload(f.read())
+                    encoder(part)
+            else:
+                with open(to_bytes(filename, errors='surrogate_or_strict'), 'rb') as f:
+                    part = email.mime.application.MIMEApplication(f.read())
+                    del part['Content-Type']
+                    part.add_header('Content-Type', '%s/%s' % (main_type, sub_type))
         else:
             part = email.mime.nonmultipart.MIMENonMultipart(main_type, sub_type)
             part.set_payload(to_bytes(content))
+            if multipart_encoding:
+                encoder = set_multipart_encoding(multipart_encoding)
+                encoder(part)
 
         part.add_header('Content-Disposition', 'form-data')
         del part['MIME-Version']
