@@ -301,13 +301,49 @@ class Play(Base, Taggable, CollectionSearch):
 
         block_list = []
 
-        block_list.extend(self.pre_tasks)
-        block_list.append(flush_block)
-        block_list.extend(self._compile_roles())
-        block_list.extend(self.tasks)
-        block_list.append(flush_block)
-        block_list.extend(self.post_tasks)
-        block_list.append(flush_block)
+        if self.force_handlers:
+            # When force_handlers is enabled, each section gets its blocks
+            # wrapped so that flush_handlers runs in the 'always' section,
+            # ensuring handlers run even on failure. Empty sections get
+            # an implicit noop task to guarantee a flush point.
+            from ansible.playbook.task import Task
+
+            def _make_force_handlers_blocks(task_blocks):
+                '''Wrap task blocks with a flush in always, inserting noop if empty.'''
+                result = []
+                if task_blocks:
+                    for b in task_blocks:
+                        wrapper = Block(play=self)
+                        # b.block is always a list (NonInheritableFieldAttribute(isa='list'))
+                        wrapper.block = b.block
+                        wrapper.rescue = b.rescue
+                        wrapper.always = (b.always or []) + [flush_block]
+                        result.append(wrapper)
+                else:
+                    noop_block = Block(play=self)
+                    noop_task = Task(block=noop_block)
+                    noop_task.action = 'meta'
+                    noop_task.args = {'_raw_params': 'noop'}
+                    noop_task.implicit = True
+                    noop_task.set_loader(self._loader)
+                    noop_block.block = [noop_task]
+                    noop_block.always = [flush_block]
+                    result.append(noop_block)
+                return result
+
+            block_list.extend(_make_force_handlers_blocks(self.pre_tasks))
+            block_list.extend(_make_force_handlers_blocks(
+                list(self._compile_roles()) + list(self.tasks)
+            ))
+            block_list.extend(_make_force_handlers_blocks(self.post_tasks))
+        else:
+            block_list.extend(self.pre_tasks)
+            block_list.append(flush_block)
+            block_list.extend(self._compile_roles())
+            block_list.extend(self.tasks)
+            block_list.append(flush_block)
+            block_list.extend(self.post_tasks)
+            block_list.append(flush_block)
 
         return block_list
 
