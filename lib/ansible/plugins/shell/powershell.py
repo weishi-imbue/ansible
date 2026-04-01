@@ -26,9 +26,10 @@ from ansible.module_utils.common.text.converters import to_bytes, to_text
 from ansible.plugins.shell import ShellBase
 
 # This is weird, we are matching on byte sequences that match the utf-16-be
-# matches for '_x(a-fA-F0-9){4}_'. The \x00 and {8} will match the hex sequence
-# when it is encoded as utf-16-be.
-_STRING_DESERIAL_FIND = re.compile(rb"\x00_\x00x([\x00(a-fA-F0-9)]{8})\x00_")
+# matches for '_x(a-fA-F0-9){4}_'. Each hex char is encoded as \x00 + ASCII byte
+# in utf-16-be, so we match 4 explicit pairs to avoid matching valid Unicode
+# escape sequences like _x6100_.
+_STRING_DESERIAL_FIND = re.compile(rb"\x00_\x00x((?:\x00[a-fA-F0-9]){4})\x00_")
 
 _common_args = ['PowerShell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Unrestricted']
 
@@ -89,6 +90,85 @@ def _parse_clixml(data: bytes, stream: str = "Error") -> bytes:
             lines.append(b_escaped.decode("utf-16-be", errors="surrogatepass"))
 
     return to_bytes(''.join(lines), errors="surrogatepass")
+
+
+def _replace_stderr_clixml(stderr: bytes) -> bytes:
+    """
+    Scan stderr line by line and replace any embedded CLIXML blocks with
+    their decoded text. Non-CLIXML content is preserved unchanged.
+    Returns the original input if no CLIXML is found or on any error.
+    """
+    CLIXML_HEADER = b"#< CLIXML"
+    result = []
+    clixml_lines: list[bytes] = []
+    in_clixml = False
+    objs_depth = 0
+    seen_clixml_header = False
+
+    for line in stderr.split(b"\r\n"):
+        if not in_clixml:
+            if line == CLIXML_HEADER:
+                in_clixml = True
+                seen_clixml_header = True
+                clixml_lines = [line]
+                objs_depth = 0
+            elif seen_clixml_header and line.startswith(b"<Objs "):
+                # New CLIXML block after we've seen the header
+                in_clixml = True
+                clixml_lines = [line]
+                objs_depth = line.count(b"<Objs ") - line.count(b"</Objs>")
+            else:
+                result.append(line)
+
+        # Process CLIXML lines if we're in CLIXML mode
+        if in_clixml and line != CLIXML_HEADER:
+            # Add line to clixml_lines if not already added when entering CLIXML mode
+            already_added = (seen_clixml_header and line.startswith(b"<Objs ") and
+                            len(clixml_lines) == 1 and clixml_lines[0] == line)
+
+            if not already_added:
+                clixml_lines.append(line)
+
+            # Count <Objs> opening and </Objs> closing tags
+            objs_depth += line.count(b"<Objs ")
+            objs_depth -= line.count(b"</Objs>")
+
+            # Process the block when all <Objs> tags are closed
+            if objs_depth == 0 and b"</Objs>" in line:
+                # End of CLIXML block found - try to decode
+                clixml_data = b"\r\n".join(clixml_lines)
+
+                # Find where the last </Objs> ends to capture trailing data
+                end_idx = clixml_data.rfind(b"</Objs>") + len(b"</Objs>")
+                trailing = clixml_data[end_idx:]
+                clixml_data = clixml_data[:end_idx]
+
+                try:
+                    # Fix: Call _parse_clixml directly without unnecessary decode/encode
+                    parsed = _parse_clixml(clixml_data)
+
+                    # Fix: Strip trailing \r\n from parsed to avoid double newlines
+                    if parsed.endswith(b"\r\n"):
+                        parsed = parsed[:-2]
+
+                    combined = parsed + trailing
+
+                    # Fix: Skip appending if combined result is empty to avoid blank lines
+                    if combined:
+                        result.append(combined)
+                except Exception:
+                    # On any error, leave original data unchanged
+                    result.extend(clixml_lines)
+
+                # Reset for potential next block
+                in_clixml = False
+                clixml_lines = []
+
+    # If we ended while still in a CLIXML block (incomplete), preserve original
+    if in_clixml:
+        result.extend(clixml_lines)
+
+    return b"\r\n".join(result)
 
 
 class ShellModule(ShellBase):
