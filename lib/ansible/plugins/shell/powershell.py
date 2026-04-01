@@ -103,17 +103,21 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
     clixml_lines: list[bytes] = []
     in_clixml = False
 
+    objs_depth = 0
+
     for line in stderr.split(b"\r\n"):
         if not in_clixml:
             if line == CLIXML_HEADER:
                 in_clixml = True
+                objs_depth = 0
                 clixml_lines = [line]
             else:
                 result.append(line)
         else:
             clixml_lines.append(line)
-            if b"</Objs>" in line:
-                # End of CLIXML block found - try to decode
+            objs_depth += line.count(b"<Objs") - line.count(b"</Objs>")
+            if objs_depth <= 0 and b"</Objs>" in line:
+                # All CLIXML blocks closed - try to decode
                 clixml_data = b"\r\n".join(clixml_lines)
 
                 # Find where the last </Objs> ends to capture trailing data
@@ -123,12 +127,16 @@ def _replace_stderr_clixml(stderr: bytes) -> bytes:
 
                 try:
                     try:
-                        decoded_data = clixml_data.decode("utf-8")
+                        clixml_data.decode("utf-8")
                     except UnicodeDecodeError:
-                        decoded_data = clixml_data.decode("cp437").encode("utf-8").decode("utf-8")
+                        clixml_data = clixml_data.decode("cp437").encode("utf-8")
 
-                    parsed = _parse_clixml(decoded_data.encode("utf-8"))
-                    result.append(parsed + trailing)
+                    parsed = _parse_clixml(clixml_data)
+                    # Strip trailing \r\n that _parse_clixml may include
+                    parsed = parsed.rstrip(b"\r\n")
+                    entry = parsed + trailing
+                    if entry:
+                        result.append(entry)
                 except Exception:
                     # On any error, leave original data unchanged
                     result.extend(clixml_lines)
