@@ -440,6 +440,23 @@ class PlayIterator:
                             task = None
                         state.cur_always_task += 1
 
+            elif state.run_state == IteratingStates.HANDLERS:
+                # Iterate over the handlers list for this host state.
+                # When all handlers are exhausted, restore the previous
+                # run state or transition to COMPLETE.
+                if state.cur_handlers_task >= len(state.handlers):
+                    if state.pre_flushing_run_state is not None:
+                        state.run_state = state.pre_flushing_run_state
+                        state.pre_flushing_run_state = None
+                    else:
+                        state.run_state = IteratingStates.COMPLETE
+                    state.cur_handlers_task = 0
+                    state.handlers = []
+                    continue
+                else:
+                    task = state.handlers[state.cur_handlers_task]
+                    state.cur_handlers_task += 1
+
             elif state.run_state == IteratingStates.COMPLETE:
                 return (state, None)
 
