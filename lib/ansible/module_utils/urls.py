@@ -1029,9 +1029,10 @@ def prepare_multipart(fields):
         the ``multipart/form-data`` ``Content-Type`` header including
         ``boundary`` and ``body`` is the prepared bytestring body
 
-    Payload content from a file will be base64 encoded and will include
+    Payload content from a file will be base64 encoded by default and will include
     the appropriate ``Content-Transfer-Encoding`` and ``Content-Type``
-    headers.
+    headers. The encoding can be controlled by specifying the ``multipart_encoding``
+    parameter (supported values: 'base64', '7or8bit').
 
     Example:
         {
@@ -1043,6 +1044,11 @@ def prepare_multipart(fields):
                 "content": "text based file content",
                 "filename": "fake.txt",
                 "mime_type": "text/plain",
+            },
+            "file3": {
+                "filename": "/path/to/file.json",
+                "mime_type": "application/json",
+                "multipart_encoding": "7or8bit"
             },
             "text_form_field": "value"
         }
@@ -1097,6 +1103,9 @@ def prepare_multipart(fields):
         else:
             part = email.mime.nonmultipart.MIMENonMultipart(main_type, sub_type)
             part.set_payload(to_bytes(content))
+            if multipart_encoding:
+                encoder = set_multipart_encoding(multipart_encoding)
+                encoder(part)
 
         part.add_header('Content-Disposition', 'form-data')
         del part['MIME-Version']
