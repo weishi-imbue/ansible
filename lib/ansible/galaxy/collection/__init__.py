@@ -531,7 +531,7 @@ def install_collections(
                 )
                 continue
 
-            if upgrade and any(
+            if upgrade and not force and not force_deps and any(
                 concrete_coll_pin.fqcn == existing.fqcn
                 and concrete_coll_pin.ver == existing.ver
                 for existing in existing_collections

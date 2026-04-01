@@ -1,0 +1,95 @@
+diff --git a/lib/ansible/cli/galaxy.py b/lib/ansible/cli/galaxy.py
+index 154a6731a1..1edec5e073 100644
+--- a/lib/ansible/cli/galaxy.py
++++ b/lib/ansible/cli/galaxy.py
+@@ -398,6 +398,8 @@ class GalaxyCLI(CLI):
+                                         help='A file containing a list of collections to be installed.')
+             install_parser.add_argument('--pre', dest='allow_pre_release', action='store_true',
+                                         help='Include pre-release versions. Semantic versioning pre-releases are ignored by default')
++            install_parser.add_argument('-U', '--upgrade', dest='upgrade', action='store_true', default=False,
++                                        help='Upgrade installed collection(s) to the latest available version.')
+         else:
+             install_parser.add_argument('-r', '--role-file', dest='requirements',
+                                         help='A file containing a list of roles to be installed.')
+@@ -1179,6 +1181,7 @@ class GalaxyCLI(CLI):
+         no_deps = context.CLIARGS['no_deps']
+         force_with_deps = context.CLIARGS['force_with_deps']
+         allow_pre_release = context.CLIARGS['allow_pre_release'] if 'allow_pre_release' in context.CLIARGS else False
++        upgrade = context.CLIARGS.get('upgrade', False)
+ 
+         collections_path = C.COLLECTIONS_PATHS
+         if len([p for p in collections_path if p.startswith(path)]) == 0:
+@@ -1195,6 +1198,7 @@ class GalaxyCLI(CLI):
+             requirements, output_path, self.api_servers, ignore_errors,
+             no_deps, force, force_with_deps,
+             allow_pre_release=allow_pre_release,
++            upgrade=upgrade,
+             artifacts_manager=artifacts_manager,
+         )
+ 
+diff --git a/lib/ansible/galaxy/collection/__init__.py b/lib/ansible/galaxy/collection/__init__.py
+index c3a1ff8e43..c44d74fbd6 100644
+--- a/lib/ansible/galaxy/collection/__init__.py
++++ b/lib/ansible/galaxy/collection/__init__.py
+@@ -409,6 +409,7 @@ def install_collections(
+         force_deps,  # type: bool
+         allow_pre_release,  # type: bool
+         artifacts_manager,  # type: ConcreteArtifactsManager
++        upgrade=False,  # type: bool
+ ):  # type: (...) -> None
+     """Install Ansible collections to the path specified.
+ 
+@@ -420,6 +421,7 @@ def install_collections(
+     :param no_deps: Ignore any collection dependencies and only install the base requirements.
+     :param force: Re-install a collection if it has already been installed.
+     :param force_deps: Re-install a collection as well as its dependencies if they have already been installed.
++    :param upgrade: Upgrade installed collections to the latest available version.
+     """
+     existing_collections = {
+         Requirement(coll.fqcn, coll.ver, coll.src, coll.type)
+@@ -443,15 +445,15 @@ def install_collections(
+     requested_requirements_names = {req.fqcn for req in unsatisfied_requirements}
+ 
+     # NOTE: Don't attempt to reevaluate already installed deps
+-    # NOTE: unless `--force` or `--force-with-deps` is passed
+-    unsatisfied_requirements -= set() if force or force_deps else {
++    # NOTE: unless `--force`, `--force-with-deps`, or `--upgrade` is passed
++    unsatisfied_requirements -= set() if force or force_deps or upgrade else {
+         req
+         for req in unsatisfied_requirements
+         for exs in existing_collections
+         if req.fqcn == exs.fqcn and meets_requirements(exs.ver, req.ver)
+     }
+ 
+-    if not unsatisfied_requirements:
++    if not unsatisfied_requirements and not upgrade:
+         display.display(
+             'Nothing to do. All requested collections are already '
+             'installed. If you want to reinstall them, '
+@@ -468,7 +470,7 @@ def install_collections(
+ 
+     preferred_requirements = (
+         [] if force_deps
+-        else existing_non_requested_collections if force
++        else existing_non_requested_collections if force or upgrade
+         else existing_collections
+     )
+     preferred_collections = {
+@@ -529,6 +531,17 @@ def install_collections(
+                 )
+                 continue
+ 
++            if upgrade and any(
++                concrete_coll_pin.fqcn == existing.fqcn
++                and concrete_coll_pin.ver == existing.ver
++                for existing in existing_collections
++            ):
++                display.display(
++                    "Skipping '{coll!s}' as it is already up-to-date".
++                    format(coll=to_text(concrete_coll_pin)),
++                )
++                continue
++
+             try:
+                 install(concrete_coll_pin, output_path, artifacts_manager)
+             except AnsibleError as err:
