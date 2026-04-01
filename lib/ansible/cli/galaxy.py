@@ -602,10 +602,10 @@ class GalaxyCLI(CLI):
                         req_type = 'git'
                         if req_src:
                             req_name = req_src
-                    elif req_src and (req_src.endswith('.git') or req_src.startswith('git@') or req_src.startswith('git+')):
+                    elif req_src and (req_src.endswith('.git') or req_src.startswith('git@') or req_src.startswith('git+') or '.git#' in req_src):
                         req_type = 'git'
                         req_name = req_src
-                    elif req_name and (req_name.endswith('.git') or req_name.startswith('git@') or req_name.startswith('git+')):
+                    elif req_name and (req_name.endswith('.git') or req_name.startswith('git@') or req_name.startswith('git+') or '.git#' in req_name):
                         req_type = 'git'
 
                     if req_type == 'git':
@@ -764,7 +764,7 @@ class GalaxyCLI(CLI):
                     name = collection_input
                     requirements['collections'].append((name, requirement or '*', 'file', None))
                 elif urlparse(collection_input).scheme.lower() in ['http', 'https']:
-                    if collection_input.endswith('.git') or '//' in collection_input and '.git' in collection_input:
+                    if collection_input.endswith('.git'):
                         # Arg is a git URL
                         requirements['collections'].append((collection_input, None, 'git', None))
                     else:
