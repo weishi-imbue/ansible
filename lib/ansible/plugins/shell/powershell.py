@@ -26,9 +26,10 @@ from ansible.module_utils.common.text.converters import to_bytes, to_text
 from ansible.plugins.shell import ShellBase
 
 # This is weird, we are matching on byte sequences that match the utf-16-be
-# matches for '_x(a-fA-F0-9){4}_'. The \x00 and {8} will match the hex sequence
-# when it is encoded as utf-16-be.
-_STRING_DESERIAL_FIND = re.compile(rb"\x00_\x00x([\x00(a-fA-F0-9)]{8})\x00_")
+# matches for '_x(a-fA-F0-9){4}_'. Each hex char is encoded as \x00 + ASCII byte
+# in utf-16-be, so we match 4 explicit pairs to avoid matching valid Unicode
+# escape sequences like _x6100_.
+_STRING_DESERIAL_FIND = re.compile(rb"\x00_\x00x((?:\x00[a-fA-F0-9]){4})\x00_")
 
 _common_args = ['PowerShell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Unrestricted']
 
@@ -89,6 +90,65 @@ def _parse_clixml(data: bytes, stream: str = "Error") -> bytes:
             lines.append(b_escaped.decode("utf-16-be", errors="surrogatepass"))
 
     return to_bytes(''.join(lines), errors="surrogatepass")
+
+
+def _replace_stderr_clixml(stderr: bytes) -> bytes:
+    """
+    Scan stderr line by line and replace any embedded CLIXML blocks with
+    their decoded text. Non-CLIXML content is preserved unchanged.
+    Returns the original input if no CLIXML is found or on any error.
+    """
+    CLIXML_HEADER = b"#< CLIXML"
+    result = []
+    clixml_lines: list[bytes] = []
+    in_clixml = False
+
+    objs_depth = 0
+
+    for line in stderr.split(b"\r\n"):
+        if not in_clixml:
+            if line == CLIXML_HEADER:
+                in_clixml = True
+                objs_depth = 0
+                clixml_lines = [line]
+            else:
+                result.append(line)
+        else:
+            clixml_lines.append(line)
+            objs_depth += line.count(b"<Objs") - line.count(b"</Objs>")
+            if objs_depth <= 0 and b"</Objs>" in line:
+                # All CLIXML blocks closed - try to decode
+                clixml_data = b"\r\n".join(clixml_lines)
+
+                # Find where the last </Objs> ends to capture trailing data
+                end_idx = clixml_data.rfind(b"</Objs>") + len(b"</Objs>")
+                trailing = clixml_data[end_idx:]
+                clixml_data = clixml_data[:end_idx]
+
+                try:
+                    try:
+                        clixml_data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        clixml_data = clixml_data.decode("cp437").encode("utf-8")
+
+                    parsed = _parse_clixml(clixml_data)
+                    # Strip trailing \r\n that _parse_clixml may include
+                    parsed = parsed.rstrip(b"\r\n")
+                    entry = parsed + trailing
+                    if entry:
+                        result.append(entry)
+                except Exception:
+                    # On any error, leave original data unchanged
+                    result.extend(clixml_lines)
+
+                in_clixml = False
+                clixml_lines = []
+
+    # If we ended while still in a CLIXML block (incomplete), preserve original
+    if in_clixml:
+        result.extend(clixml_lines)
+
+    return b"\r\n".join(result)
 
 
 class ShellModule(ShellBase):
