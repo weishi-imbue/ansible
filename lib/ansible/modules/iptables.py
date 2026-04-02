@@ -290,6 +290,21 @@ options:
       - Specifies the destination IP range to match in the iprange module.
     type: str
     version_added: "2.8"
+  match_set:
+    description:
+      - Specifies the name of the ipset to match against using the set extension.
+      - Requires C(match_set_flags) to be set.
+      - If C(match) does not already include C(set), it will be added automatically.
+    type: str
+    version_added: "2.11"
+  match_set_flags:
+    description:
+      - Specifies the comma-separated list of flags (C(src) and/or C(dst)) for the
+        ipset match, one per dimension of the ipset type.
+      - "For example: C(src), C(dst), C(src,dst), C(src,src), C(dst,dst,src)."
+      - Requires C(match_set) to be set.
+    type: str
+    version_added: "2.11"
   limit:
     description:
       - Specifies the maximum average number of matches to allow per second.
@@ -596,10 +611,10 @@ def construct_rule(params):
         append_param(rule, params['dst_range'], '--dst-range', False)
     if 'set' in params['match']:
         if params['match_set']:
-            append_param(rule, params['match_set'] + ' ' + params['match_set_flags'], '--match-set', False)
+            rule.extend(['--match-set', params['match_set'], params['match_set_flags']])
     elif params['match_set']:
         append_match(rule, params['match_set'], 'set')
-        append_param(rule, params['match_set'] + ' ' + params['match_set_flags'], '--match-set', False)
+        rule.extend(['--match-set', params['match_set'], params['match_set_flags']])
     append_match(rule, params['limit'] or params['limit_burst'], 'limit')
     append_param(rule, params['limit'], '--limit', False)
     append_param(rule, params['limit_burst'], '--limit-burst', False)
@@ -732,7 +747,7 @@ def main():
             uid_owner=dict(type='str'),
             gid_owner=dict(type='str'),
             match_set=dict(type='str'),
-            match_set_flags=dict(type='str', choices=['src', 'dst', 'src,dst', 'dst,src']),
+            match_set_flags=dict(type='str'),
             reject_with=dict(type='str'),
             icmp_type=dict(type='str'),
             syn=dict(type='str', default='ignore', choices=['ignore', 'match', 'negate']),
@@ -751,6 +766,12 @@ def main():
             ['jump', 'tee', ['gateway']],
         ]
     )
+    match_set_flags = module.params.get('match_set_flags')
+    if match_set_flags is not None:
+        import re
+        if not re.match(r'^(src|dst)(,(src|dst))*$', match_set_flags):
+            module.fail_json(msg="match_set_flags must be a comma-separated list of 'src' and/or 'dst' flags, got: %s" % match_set_flags)
+
     args = dict(
         changed=False,
         failed=False,
