@@ -62,6 +62,17 @@ jobs:
           hash_prefix = "${HASH}"
           repo_name = "${REPO_NAME}"
 
+          import ast
+          def _parse_list(val):
+              if isinstance(val, list):
+                  return val
+              if not val or not val.strip():
+                  return []
+              try:
+                  return json.loads(val)
+              except (json.JSONDecodeError, ValueError):
+                  return ast.literal_eval(val)
+
           # Find instance in HuggingFace dataset
           ds = load_dataset("ScaleAI/SWE-bench_Pro", split="test")
           instance = None
@@ -85,9 +96,9 @@ jobs:
               "repo": instance["repo"],
               "base_commit": instance["base_commit"],
               "before_repo_set_cmd": instance.get("before_repo_set_cmd", ""),
-              "fail_to_pass": json.loads(instance["fail_to_pass"]) if isinstance(instance["fail_to_pass"], str) else instance["fail_to_pass"],
-              "pass_to_pass": json.loads(instance["pass_to_pass"]) if isinstance(instance["pass_to_pass"], str) else instance["pass_to_pass"],
-              "selected_test_files": instance.get("selected_test_files_to_run", ""),
+              "fail_to_pass": _parse_list(instance["fail_to_pass"]),
+              "pass_to_pass": _parse_list(instance["pass_to_pass"]),
+              "selected_test_files": ",".join(_parse_list(instance.get("selected_test_files_to_run", ""))),
               "dockerhub_tag": instance.get("dockerhub_tag", ""),
           }
 
