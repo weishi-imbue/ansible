@@ -233,9 +233,11 @@ jobs:
           output = json.load(open('/tmp/workspace/output.json'))
           f2p = meta.get('fail_to_pass', [])
           p2p = meta.get('pass_to_pass', [])
-          tests = output if isinstance(output, dict) and 'tests' not in output else output.get('tests', output)
-          f2p_pass = sum(1 for t in f2p if tests.get(t) == 'PASSED')
-          p2p_pass = sum(1 for t in p2p if tests.get(t) == 'PASSED')
+          # output.tests is a list of {name, status} dicts
+          test_list = output.get('tests', output) if isinstance(output, dict) else output
+          test_map = {t['name']: t['status'] for t in test_list} if isinstance(test_list, list) and test_list and isinstance(test_list[0], dict) else test_list
+          f2p_pass = sum(1 for t in f2p if test_map.get(t) == 'PASSED')
+          p2p_pass = sum(1 for t in p2p if test_map.get(t) == 'PASSED')
           total = len(f2p) + len(p2p)
           passed = f2p_pass + p2p_pass
           print(f'{passed}/{total} (f2p={f2p_pass}/{len(f2p)}, p2p={p2p_pass}/{len(p2p)})')
