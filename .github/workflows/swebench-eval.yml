@@ -1,0 +1,225 @@
+name: SWE-bench Pro Eval
+
+on:
+  push:
+    branches:
+      - 'swb/*/exp*'
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse task from branch
+        id: task
+        run: |
+          BRANCH=${GITHUB_REF#refs/heads/}
+          # Branch format: swb/{hash}/{experiment-name}
+          HASH=$(echo "$BRANCH" | cut -d/ -f2)
+          TASK="swb-ansible-${HASH}"
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Task: $TASK, Hash: $HASH"
+
+      - name: Fetch task metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          HASH="${{ steps.task.outputs.hash }}"
+          TASK="${{ steps.task.outputs.task }}"
+          BASE_URL="https://raw.githubusercontent.com/imbue-ai/agent-nl2repo/wz/swebench/benchmarks/swb-ansible/${HASH}"
+
+          # Download metadata, run_script, parser
+          mkdir -p /tmp/eval_scripts
+          curl -sL "${BASE_URL}/metadata.json" -o /tmp/eval_scripts/metadata.json
+          curl -sL "${BASE_URL}/run_script.sh" -o /tmp/eval_scripts/run_script.sh
+          curl -sL "${BASE_URL}/parser.py" -o /tmp/eval_scripts/parser.py
+
+          # Parse metadata
+          INSTANCE_ID=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m['instance_id'])")
+          EVAL_IMAGE=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m['eval_image'])")
+          BASE_COMMIT=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m['base_commit'])")
+          BEFORE_CMD=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m.get('before_repo_set_cmd',''))")
+          TEST_FILES=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m.get('selected_test_files',''))")
+          ENV_SETUP=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m.get('env_setup',''))")
+          F2P=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(json.dumps(m.get('fail_to_pass',[])))")
+          P2P=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(json.dumps(m.get('pass_to_pass',[])))")
+
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "eval_image=$EVAL_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "base_commit=$BASE_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Instance: $INSTANCE_ID"
+          echo "Image: $EVAL_IMAGE"
+
+      - name: Extract patch from commits
+        id: patch
+        run: |
+          # Get the base branch (the branch this PR targets)
+          BRANCH="${{ steps.task.outputs.branch }}"
+          # Base branch is the same name with -base suffix
+          # Find it by looking for the merge base
+          BASE_COMMIT="${{ steps.meta.outputs.base_commit }}"
+
+          # The full PR diff = all changes from base_commit
+          git diff "${BASE_COMMIT}" HEAD > /tmp/patch.diff
+
+          PATCH_SIZE=$(wc -c < /tmp/patch.diff)
+          echo "Patch size: $PATCH_SIZE bytes"
+
+          # Verify not null bytes
+          if head -c 10 /tmp/patch.diff | xxd | grep -q "0000 0000 0000"; then
+            echo "::error::Patch file contains null bytes!"
+            exit 1
+          fi
+
+          # Verify has actual diff content
+          if ! grep -q "^diff --git" /tmp/patch.diff; then
+            echo "::error::Patch file has no diff content!"
+            exit 1
+          fi
+
+          echo "patch_file=/tmp/patch.diff" >> "$GITHUB_OUTPUT"
+
+      - name: Build entryscript
+        run: |
+          python3 << 'PYEOF'
+          import json
+
+          meta = json.load(open("/tmp/eval_scripts/metadata.json"))
+          base_commit = meta["base_commit"]
+          before_cmd = meta.get("before_repo_set_cmd", "").strip()
+          test_files = meta.get("selected_test_files", "")
+          env_setup = meta.get("env_setup", "")
+
+          # Match upstream create_entryscript: last line of before_repo_set_cmd
+          last_cmd = before_cmd.split("\n")[-1] if before_cmd else ""
+
+          entryscript = f"""{env_setup}
+          # apply patch
+          cd /app
+          git reset --hard {base_commit}
+          git checkout {base_commit}
+          git apply -v /workspace/patch.diff
+          {last_cmd}
+          # run test and save stdout and stderr
+          bash /workspace/run_script.sh {test_files} > /workspace/stdout.log 2> /workspace/stderr.log
+          # run parsing script
+          python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json
+          """
+
+          open("/tmp/eval_scripts/entryscript.sh", "w").write(entryscript)
+          print("Entryscript written")
+          PYEOF
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Run eval in Docker
+        id: eval
+        run: |
+          EVAL_IMAGE="${{ steps.meta.outputs.eval_image }}"
+
+          # Pull image
+          echo "Pulling $EVAL_IMAGE..."
+          docker pull "$EVAL_IMAGE"
+
+          # Prepare workspace
+          mkdir -p /tmp/workspace
+          cp /tmp/patch.diff /tmp/workspace/patch.diff
+          cp /tmp/eval_scripts/run_script.sh /tmp/workspace/run_script.sh
+          cp /tmp/eval_scripts/parser.py /tmp/workspace/parser.py
+          cp /tmp/eval_scripts/entryscript.sh /tmp/workspace/entryscript.sh
+
+          # Run eval container
+          echo "Running eval..."
+          docker run --rm \
+            -v /tmp/workspace:/workspace \
+            --entrypoint /bin/bash \
+            "$EVAL_IMAGE" \
+            -c "bash /workspace/entryscript.sh"
+
+          # Check output
+          if [ -f /tmp/workspace/output.json ]; then
+            echo "Eval output:"
+            cat /tmp/workspace/output.json
+            echo "output_file=/tmp/workspace/output.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::No output.json produced"
+            echo "stdout.log:"
+            cat /tmp/workspace/stdout.log 2>/dev/null || echo "(empty)"
+            echo "stderr.log:"
+            cat /tmp/workspace/stderr.log 2>/dev/null | tail -50
+            exit 1
+          fi
+
+      - name: Parse results and post comment
+        if: always() && steps.eval.outputs.output_file
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const output = JSON.parse(fs.readFileSync('/tmp/workspace/output.json', 'utf8'));
+
+            // Parse f2p/p2p from metadata
+            const meta = JSON.parse(fs.readFileSync('/tmp/eval_scripts/metadata.json', 'utf8'));
+            const f2p = meta.fail_to_pass || [];
+            const p2p = meta.pass_to_pass || [];
+
+            // output.json format: {"tests": {"test_name": "PASSED|FAILED", ...}}
+            const tests = output.tests || output;
+            let f2pPass = 0, p2pPass = 0;
+            for (const t of f2p) {
+              if (tests[t] === 'PASSED') f2pPass++;
+            }
+            for (const t of p2p) {
+              if (tests[t] === 'PASSED') p2pPass++;
+            }
+            const total = f2p.length + p2p.length;
+            const passed = f2pPass + p2pPass;
+
+            const task = '${{ steps.task.outputs.task }}';
+            const branch = '${{ steps.task.outputs.branch }}';
+            const sha = context.sha.substring(0, 8);
+
+            const body = `## Auto-Eval: ${task}
+
+            | Metric | Value |
+            |--------|-------|
+            | **Score** | ${passed}/${total} |
+            | f2p | ${f2pPass}/${f2p.length} |
+            | p2p | ${p2pPass}/${p2p.length} |
+            | Commit | ${sha} |
+            | Branch | \`${branch}\` |
+
+            *Evaluated using upstream SWE-bench Pro harness via GitHub Actions.*`;
+
+            // Find the PR for this branch
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${branch}`,
+              state: 'open'
+            });
+
+            if (prs.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prs.data[0].number,
+                body: body
+              });
+              console.log(`Posted comment on PR #${prs.data[0].number}`);
+            } else {
+              console.log('No open PR found for this branch');
+              console.log(body);
+            }
