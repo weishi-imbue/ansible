@@ -1,9 +1,18 @@
 name: SWE-bench Pro Eval
 
+# Trigger manually or via repository_dispatch (for automation)
 on:
-  push:
-    branches:
-      - 'swb/*/exp*'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to evaluate'
+        required: true
+        type: number
+      eval_runs:
+        description: 'Number of eval runs (default 1)'
+        required: false
+        default: '1'
+        type: string
 
 jobs:
   eval:
@@ -15,77 +24,103 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Parse task from branch
-        id: task
-        run: |
-          BRANCH=${GITHUB_REF#refs/heads/}
-          # Branch format: swb/{hash}/{experiment-name}
-          HASH=$(echo "$BRANCH" | cut -d/ -f2)
-          TASK="swb-ansible-${HASH}"
-          echo "task=$TASK" >> "$GITHUB_OUTPUT"
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "Task: $TASK, Hash: $HASH"
-
-      - name: Fetch task metadata
-        id: meta
+      - name: Get PR info
+        id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          HASH="${{ steps.task.outputs.hash }}"
-          TASK="${{ steps.task.outputs.task }}"
-          BASE_URL="https://raw.githubusercontent.com/imbue-ai/agent-nl2repo/wz/swebench/benchmarks/swb-ansible/${HASH}"
+          PR_NUM="${{ inputs.pr_number }}"
+          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUM})
 
-          # Download metadata, run_script, parser
+          HEAD_REF=$(echo "$PR_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['head']['ref'])")
+          BASE_REF=$(echo "$PR_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['base']['ref'])")
+          HEAD_SHA=$(echo "$PR_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['head']['sha'])")
+          TITLE=$(echo "$PR_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['title'])")
+
+          # Parse task hash from branch name: swb/{hash}/...
+          HASH=$(echo "$HEAD_REF" | cut -d/ -f2)
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d/ -f2)
+          TASK="swb-${REPO_NAME}-${HASH}"
+
+          echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$BASE_REF" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
+          echo "PR #${PR_NUM}: $TITLE"
+          echo "Task: $TASK, Head: $HEAD_REF, Base: $BASE_REF"
+
+      - name: Checkout PR head
+        run: |
+          git fetch origin "${{ steps.pr.outputs.head_ref }}"
+          git checkout "origin/${{ steps.pr.outputs.head_ref }}"
+
+      - name: Fetch task metadata
+        id: meta
+        run: |
+          HASH="${{ steps.pr.outputs.hash }}"
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d/ -f2)
+          BASE_URL="https://raw.githubusercontent.com/imbue-ai/agent-nl2repo/wz/swebench/benchmarks/swb-${REPO_NAME}/${HASH}"
+
           mkdir -p /tmp/eval_scripts
-          curl -sL "${BASE_URL}/metadata.json" -o /tmp/eval_scripts/metadata.json
-          curl -sL "${BASE_URL}/run_script.sh" -o /tmp/eval_scripts/run_script.sh
-          curl -sL "${BASE_URL}/parser.py" -o /tmp/eval_scripts/parser.py
+          curl -sfL "${BASE_URL}/metadata.json" -o /tmp/eval_scripts/metadata.json
+          curl -sfL "${BASE_URL}/run_script.sh" -o /tmp/eval_scripts/run_script.sh
+          curl -sfL "${BASE_URL}/parser.py" -o /tmp/eval_scripts/parser.py
+
+          # Verify downloads
+          for f in metadata.json run_script.sh parser.py; do
+            if [ ! -s "/tmp/eval_scripts/$f" ]; then
+              echo "::error::Failed to download $f"
+              exit 1
+            fi
+          done
 
           # Parse metadata
-          INSTANCE_ID=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m['instance_id'])")
-          EVAL_IMAGE=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m['eval_image'])")
-          BASE_COMMIT=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m['base_commit'])")
-          BEFORE_CMD=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m.get('before_repo_set_cmd',''))")
-          TEST_FILES=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m.get('selected_test_files',''))")
-          ENV_SETUP=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(m.get('env_setup',''))")
-          F2P=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(json.dumps(m.get('fail_to_pass',[])))")
-          P2P=$(python3 -c "import json; m=json.load(open('/tmp/eval_scripts/metadata.json')); print(json.dumps(m.get('pass_to_pass',[])))")
+          python3 -c "
+          import json
+          m = json.load(open('/tmp/eval_scripts/metadata.json'))
+          print(f\"instance_id: {m['instance_id']}\")
+          print(f\"eval_image: {m['eval_image']}\")
+          print(f\"base_commit: {m['base_commit']}\")
+          print(f\"test_case_count: {m['test_case_count']}\")
+          "
+
+          INSTANCE_ID=$(python3 -c "import json; print(json.load(open('/tmp/eval_scripts/metadata.json'))['instance_id'])")
+          EVAL_IMAGE=$(python3 -c "import json; print(json.load(open('/tmp/eval_scripts/metadata.json'))['eval_image'])")
+          BASE_COMMIT=$(python3 -c "import json; print(json.load(open('/tmp/eval_scripts/metadata.json'))['base_commit'])")
 
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "eval_image=$EVAL_IMAGE" >> "$GITHUB_OUTPUT"
           echo "base_commit=$BASE_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "Instance: $INSTANCE_ID"
-          echo "Image: $EVAL_IMAGE"
 
-      - name: Extract patch from commits
+      - name: Extract patch
         id: patch
         run: |
-          # Get the base branch (the branch this PR targets)
-          BRANCH="${{ steps.task.outputs.branch }}"
-          # Base branch is the same name with -base suffix
-          # Find it by looking for the merge base
           BASE_COMMIT="${{ steps.meta.outputs.base_commit }}"
 
-          # The full PR diff = all changes from base_commit
+          # Full diff from base_commit to HEAD = impl + fixer changes
           git diff "${BASE_COMMIT}" HEAD > /tmp/patch.diff
 
           PATCH_SIZE=$(wc -c < /tmp/patch.diff)
-          echo "Patch size: $PATCH_SIZE bytes"
+          PATCH_FILES=$(grep -c "^diff --git" /tmp/patch.diff || true)
+          echo "Patch: $PATCH_SIZE bytes, $PATCH_FILES files"
 
-          # Verify not null bytes
+          # Verify patch integrity
+          if [ "$PATCH_SIZE" -eq 0 ]; then
+            echo "::error::Empty patch"
+            exit 1
+          fi
           if head -c 10 /tmp/patch.diff | xxd | grep -q "0000 0000 0000"; then
-            echo "::error::Patch file contains null bytes!"
+            echo "::error::Null bytes in patch"
             exit 1
           fi
-
-          # Verify has actual diff content
           if ! grep -q "^diff --git" /tmp/patch.diff; then
-            echo "::error::Patch file has no diff content!"
+            echo "::error::No diff content in patch"
             exit 1
           fi
-
-          echo "patch_file=/tmp/patch.diff" >> "$GITHUB_OUTPUT"
 
       - name: Build entryscript
         run: |
@@ -98,7 +133,7 @@ jobs:
           test_files = meta.get("selected_test_files", "")
           env_setup = meta.get("env_setup", "")
 
-          # Match upstream create_entryscript: last line of before_repo_set_cmd
+          # Match upstream create_entryscript(): last line of before_repo_set_cmd
           last_cmd = before_cmd.split("\n")[-1] if before_cmd else ""
 
           entryscript = f"""{env_setup}
@@ -108,112 +143,99 @@ jobs:
           git checkout {base_commit}
           git apply -v /workspace/patch.diff
           {last_cmd}
-          # run test and save stdout and stderr
+          # run test
           bash /workspace/run_script.sh {test_files} > /workspace/stdout.log 2> /workspace/stderr.log
-          # run parsing script
+          # parse results
           python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json
           """
 
           open("/tmp/eval_scripts/entryscript.sh", "w").write(entryscript)
-          print("Entryscript written")
+          print("Entryscript built")
           PYEOF
 
-      - name: Run eval in Docker
+      - name: Run eval
         id: eval
         run: |
           EVAL_IMAGE="${{ steps.meta.outputs.eval_image }}"
+          RUNS="${{ inputs.eval_runs }}"
 
-          # Pull image
           echo "Pulling $EVAL_IMAGE..."
           docker pull "$EVAL_IMAGE"
 
-          # Prepare workspace
           mkdir -p /tmp/workspace
           cp /tmp/patch.diff /tmp/workspace/patch.diff
           cp /tmp/eval_scripts/run_script.sh /tmp/workspace/run_script.sh
           cp /tmp/eval_scripts/parser.py /tmp/workspace/parser.py
           cp /tmp/eval_scripts/entryscript.sh /tmp/workspace/entryscript.sh
 
-          # Run eval container
-          echo "Running eval..."
-          docker run --rm \
-            -v /tmp/workspace:/workspace \
-            --entrypoint /bin/bash \
-            "$EVAL_IMAGE" \
-            -c "bash /workspace/entryscript.sh"
+          RESULTS=""
+          for i in $(seq 1 $RUNS); do
+            echo "--- Eval run $i/$RUNS ---"
+            # Clean previous output
+            rm -f /tmp/workspace/output.json /tmp/workspace/stdout.log /tmp/workspace/stderr.log
 
-          # Check output
-          if [ -f /tmp/workspace/output.json ]; then
-            echo "Eval output:"
-            cat /tmp/workspace/output.json
-            echo "output_file=/tmp/workspace/output.json" >> "$GITHUB_OUTPUT"
+            docker run --rm \
+              -v /tmp/workspace:/workspace \
+              --entrypoint /bin/bash \
+              "$EVAL_IMAGE" \
+              -c "bash /workspace/entryscript.sh"
+
+            if [ -f /tmp/workspace/output.json ]; then
+              SCORE=$(python3 -c "
+          import json
+          meta = json.load(open('/tmp/eval_scripts/metadata.json'))
+          output = json.load(open('/tmp/workspace/output.json'))
+          f2p = meta.get('fail_to_pass', [])
+          p2p = meta.get('pass_to_pass', [])
+          tests = output if isinstance(output, dict) and 'tests' not in output else output.get('tests', output)
+          f2p_pass = sum(1 for t in f2p if tests.get(t) == 'PASSED')
+          p2p_pass = sum(1 for t in p2p if tests.get(t) == 'PASSED')
+          total = len(f2p) + len(p2p)
+          passed = f2p_pass + p2p_pass
+          print(f'{passed}/{total} (f2p={f2p_pass}/{len(f2p)}, p2p={p2p_pass}/{len(p2p)})')
+          ")
+              echo "Run $i: $SCORE"
+              RESULTS="${RESULTS}${SCORE}\n"
+            else
+              echo "Run $i: FAILED (no output.json)"
+              echo "stderr tail:"
+              tail -20 /tmp/workspace/stderr.log 2>/dev/null
+              RESULTS="${RESULTS}FAILED\n"
+            fi
+          done
+
+          echo -e "$RESULTS" > /tmp/eval_results.txt
+          echo "results_file=/tmp/eval_results.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Post results comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ steps.pr.outputs.pr_number }}"
+          TASK="${{ steps.pr.outputs.task }}"
+          SHA="${{ steps.pr.outputs.head_sha }}"
+          TITLE="${{ steps.pr.outputs.title }}"
+
+          if [ -f /tmp/eval_results.txt ]; then
+            RESULTS=$(cat /tmp/eval_results.txt)
           else
-            echo "::error::No output.json produced"
-            echo "stdout.log:"
-            cat /tmp/workspace/stdout.log 2>/dev/null || echo "(empty)"
-            echo "stderr.log:"
-            cat /tmp/workspace/stderr.log 2>/dev/null | tail -50
-            exit 1
+            RESULTS="Eval failed — no results"
           fi
 
-      - name: Parse results and post comment
-        if: always() && steps.eval.outputs.output_file
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const output = JSON.parse(fs.readFileSync('/tmp/workspace/output.json', 'utf8'));
+          BODY="## Auto-Eval: ${TASK}
 
-            // Parse f2p/p2p from metadata
-            const meta = JSON.parse(fs.readFileSync('/tmp/eval_scripts/metadata.json', 'utf8'));
-            const f2p = meta.fail_to_pass || [];
-            const p2p = meta.pass_to_pass || [];
+          **PR**: #${PR_NUM} — ${TITLE}
+          **Commit**: ${SHA:0:8}
 
-            // output.json format: {"tests": {"test_name": "PASSED|FAILED", ...}}
-            const tests = output.tests || output;
-            let f2pPass = 0, p2pPass = 0;
-            for (const t of f2p) {
-              if (tests[t] === 'PASSED') f2pPass++;
-            }
-            for (const t of p2p) {
-              if (tests[t] === 'PASSED') p2pPass++;
-            }
-            const total = f2p.length + p2p.length;
-            const passed = f2pPass + p2pPass;
+          \`\`\`
+          ${RESULTS}
+          \`\`\`
 
-            const task = '${{ steps.task.outputs.task }}';
-            const branch = '${{ steps.task.outputs.branch }}';
-            const sha = context.sha.substring(0, 8);
+          *Evaluated using upstream SWE-bench Pro harness via GitHub Actions.*"
 
-            const body = `## Auto-Eval: ${task}
+          gh api repos/${{ github.repository }}/issues/${PR_NUM}/comments \
+            --method POST \
+            -f body="$BODY"
 
-            | Metric | Value |
-            |--------|-------|
-            | **Score** | ${passed}/${total} |
-            | f2p | ${f2pPass}/${f2p.length} |
-            | p2p | ${p2pPass}/${p2p.length} |
-            | Commit | ${sha} |
-            | Branch | \`${branch}\` |
-
-            *Evaluated using upstream SWE-bench Pro harness via GitHub Actions.*`;
-
-            // Find the PR for this branch
-            const prs = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              head: `${context.repo.owner}:${branch}`,
-              state: 'open'
-            });
-
-            if (prs.data.length > 0) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prs.data[0].number,
-                body: body
-              });
-              console.log(`Posted comment on PR #${prs.data[0].number}`);
-            } else {
-              console.log('No open PR found for this branch');
-              console.log(body);
-            }
+          echo "Posted results to PR #${PR_NUM}"
