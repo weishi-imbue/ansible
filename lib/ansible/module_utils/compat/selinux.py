@@ -76,5 +76,6 @@ def selinux_getpolicytype():
     rc = _selinux.selinux_getpolicytype(ctypes.byref(policytype))
     if rc == 0 and policytype.value is not None:
         result = [rc, policytype.value.decode('utf-8', 'surrogateescape')]
+        _selinux.freecon(policytype)
         return result
     return [rc, '']
