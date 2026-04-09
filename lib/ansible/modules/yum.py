@@ -373,6 +373,7 @@ from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils._text import to_native, to_text
 from ansible.module_utils.urls import fetch_url
 from ansible.module_utils.yumdnf import YumDnf, yumdnf_argument_spec
+from ansible.module_utils.common.respawn import has_respawned, respawn_module, probe_interpreters_for_module
 
 import errno
 import os
@@ -1599,10 +1600,19 @@ class YumModule(YumDnf):
         """
 
         error_msgs = []
+        if not HAS_RPM_PYTHON or not HAS_YUM_PYTHON:
+            if sys.executable != '/usr/bin/python' and not has_respawned():
+                interpreter = probe_interpreters_for_module(
+                    ['/usr/libexec/platform-python', '/usr/bin/python3', '/usr/bin/python2', '/usr/bin/python'], 'yum')
+                if interpreter:
+                    respawn_module(interpreter)
+
         if not HAS_RPM_PYTHON:
-            error_msgs.append('The Python 2 bindings for rpm are needed for this module. If you require Python 3 support use the `dnf` Ansible module instead.')
+            error_msgs.append('The Python 2 bindings for rpm are needed for this module. If you require Python 3 support use the `dnf` Ansible module instead. '
+                              'Please install the python-rpm package or ensure you have specified the correct ansible_python_interpreter. ({0})'.format(sys.executable))
         if not HAS_YUM_PYTHON:
-            error_msgs.append('The Python 2 yum module is needed for this module. If you require Python 3 support use the `dnf` Ansible module instead.')
+            error_msgs.append('The Python 2 yum module is needed for this module. If you require Python 3 support use the `dnf` Ansible module instead. '
+                              'Please install the yum package or ensure you have specified the correct ansible_python_interpreter. ({0})'.format(sys.executable))
 
         self.wait_for_lock()
 
